@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.config import get_settings
-from app.routers import health
+from app.routers import documents, health
 
 logger = logging.getLogger("rag_masterclass")
 
@@ -93,8 +93,7 @@ def create_app() -> FastAPI:
     #   app.include_router(threads.router)
     #
     # G-5b (backend-2) registers document upload/list/delete endpoints:
-    #   from app.routers import documents
-    #   app.include_router(documents.router)
+    app.include_router(documents.router)
 
     return app
 
