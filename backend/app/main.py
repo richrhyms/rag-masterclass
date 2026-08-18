@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.config import get_settings
-from app.routers import health
+from app.routers import health, threads
 
 logger = logging.getLogger("rag_masterclass")
 
@@ -86,15 +86,16 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(health.router)
+    app.include_router(threads.router)
 
     # --- Router registration seam ---
-    # G-5a (backend-1) registers thread/message/chat endpoints:
-    #   from app.routers import threads
-    #   app.include_router(threads.router)
-    #
-    # G-5b (backend-2) registers document upload/list/delete endpoints:
+    # G-5b (backend-2) registers document upload/list/delete endpoints on its
+    # own parallel branch (orchestration/.../backend-2-g5b):
     #   from app.routers import documents
     #   app.include_router(documents.router)
+    # Not registered here -- `documents.py` does not exist on this branch's
+    # tree. G-5a and G-5b are independent parallel branches per design.md;
+    # DevOps merges both at the deploy gate.
 
     return app
 
