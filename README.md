@@ -15,16 +15,28 @@ framework.
 > placeholder. Chat, ingestion, and the real app shell land at later gates
 > (G-5a/G-5b/G-6/G-7).
 
+## Architecture note: hosted Supabase, no Docker
+
+This project runs the backend and frontend as **bare local processes** and
+talks to a **hosted Supabase project** (not a self-hosted Postgres/Auth/Kong
+stack in containers). Docker is not required anywhere in this repo. If you
+want to point at a different Supabase project, update `SUPABASE_*` in
+`backend/.env` and `VITE_SUPABASE_*` in `frontend/.env` accordingly, and
+re-run the migrations (see below) against the new project.
+
 ## Prerequisites
 
-- Docker + Docker Compose (Docker Desktop on macOS/Windows, or an equivalent
-  Docker Engine)
-- Python 3.12+ (only needed if you also want to run the backend outside
-  Docker, via a venv)
-- Node.js 20+ (only needed if you also want to run the frontend outside
-  Docker)
+- Python 3.10+ (3.12/3.13 verified; the codebase uses `str | None` union
+  syntax, so 3.9 will not work)
+- Node.js 20+
+- `psql` (via `libpq` -- e.g. `brew install libpq`; it's keg-only, so call it
+  as `$(brew --prefix libpq)/bin/psql` or add it to `PATH`) -- only needed
+  once, to apply migrations to your Supabase project
+- A Supabase project (hosted, at supabase.com) with its connection details
+  (URL, anon key, service role key, JWT secret, and the direct Postgres
+  connection string from Project Settings -> Database)
 
-## Quick start (docker-compose -- recommended)
+## Quick start
 
 1. Create the two env files from their templates:
 
@@ -33,28 +45,53 @@ framework.
    cp frontend/.env.example frontend/.env
    ```
 
-   The committed defaults are the well-known **Supabase local-dev demo
-   secrets** (the same ones the Supabase CLI and Supabase's own self-hosting
-   docs publish -- not real secrets) and are wired to match this repo's
-   `docker-compose.yml`, so the stack boots with zero further edits. Fill in
+   Fill in `backend/.env` with your Supabase project's real values
+   (`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
+   `SUPABASE_JWT_SECRET`, `SUPABASE_DB_URL`) and `frontend/.env` with the
+   matching `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`. Fill in
    `OPENAI_API_KEY` / `LLM_*` / `EMBEDDING_*` / `LANGSMITH_*` in
    `backend/.env` when you're ready to exercise chat/ingestion at later
    gates (G-5a/G-5b) -- they are not required for this gate's health check.
 
-2. Boot the stack:
+   **Note on `SUPABASE_DB_URL`:** if your database password contains
+   characters like `@`, `#`, or `!`, they must be percent-encoded in the
+   connection string URI (`@` -> `%40`, `#` -> `%23`) or `psql`/libpq will
+   fail to parse the host correctly.
+
+2. Apply the database schema to your Supabase project (one-time, or whenever
+   migrations change):
 
    ```bash
-   docker compose up --build
+   PGURL="$(grep '^SUPABASE_DB_URL=' backend/.env | cut -d= -f2- | tr -d '"')"
+   for f in backend/supabase/migrations/*.sql; do
+     psql "$PGURL" -v ON_ERROR_STOP=1 -f "$f"
+   done
    ```
 
-   This starts: a self-hosted local Supabase (Postgres+pgvector, Auth,
-   PostgREST, Realtime, Storage, fronted by a Kong gateway), the FastAPI
-   backend, and the frontend dev server. The Supabase schema (tables,
-   indexes, RLS policies, the `match_chunks` RPC, and the Realtime
-   publication) is applied automatically on first Postgres boot from
-   `backend/supabase/migrations/`.
+   This creates the `thread`/`message`/`document`/`chunk` tables, the pgvector
+   index, RLS policies (enabled + forced on all four tables), the
+   `match_chunks` RPC, and the Realtime publication.
 
-3. Health check:
+3. Start the backend:
+
+   ```bash
+   cd backend
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   set -a; source .env; set +a
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   ```
+
+4. Start the frontend (separate terminal):
+
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+5. Health check:
 
    ```bash
    curl -f http://localhost:3000/api/health
@@ -62,9 +99,8 @@ framework.
    ```
 
    Port 3000 is the frontend's Vite dev server; it proxies `/api/*` to the
-   FastAPI backend (port 8000) inside the compose network, so this single
-   command verifies the whole path: frontend container up -> reachable ->
-   proxying -> backend container up -> responding.
+   FastAPI backend (port 8000), so this single command verifies the whole
+   path: frontend up -> reachable -> proxying -> backend up -> responding.
 
    You can also hit the backend directly: `curl -f http://localhost:8000/api/health`.
 
@@ -74,44 +110,17 @@ framework.
 |-------|---------------------------------------------|
 | 3000  | Frontend (Vite dev server)                   |
 | 8000  | FastAPI backend                              |
-| 54321 | Supabase API gateway (Kong)                  |
-| 54322 | Postgres                                     |
 
-## Running the backend outside Docker (venv)
+Supabase (Postgres/Auth/Realtime/Storage) runs on Supabase's hosted
+infrastructure, not on a local port.
 
-Useful for fast local iteration on backend code without rebuilding the image
-(the docker-compose backend service also bind-mounts `backend/app`, so a
-plain `docker compose up` with `--reload` already live-reloads -- this is an
-alternative for running fully outside Docker):
+## Running backend tests
 
 ```bash
 cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt   # includes requirements.txt + pytest/httpx
-cp ../.env.example .env
-# Edit backend/.env: since you're running outside the compose network, set
-# SUPABASE_URL=http://localhost:54321 (the host-published Kong port) --
-# this is already the .env.example default.
-# Start the rest of the stack (Supabase + frontend) via docker-compose first:
-#   docker compose up db auth rest realtime storage kong frontend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Run tests:
-
-```bash
-cd backend
+source venv/bin/activate
+pip install -r requirements-dev.txt   # requirements.txt + pytest/httpx
 pytest
-```
-
-## Running the frontend outside Docker
-
-```bash
-cd frontend
-npm install
-cp .env.example .env
-npm run dev
 ```
 
 ## Project layout
@@ -127,26 +136,25 @@ backend/
       health.py      # GET /api/health (the only endpoint owned by this gate)
   supabase/
     migrations/       # Tables, indexes, RLS, match_chunks RPC, Realtime publication
-    kong.yml          # Local Supabase API gateway routing (docker-compose only)
   tests/
   requirements.txt
   requirements-dev.txt
-  Dockerfile
 frontend/
   src/
     main.tsx, App.tsx # bare boot placeholder -- real shell lands at G-6/G-7
   .env.example
-  Dockerfile
-docker-compose.yml
 .env.example            # backend env template
 ```
 
 ## Notes / known limitations of this gate
 
-- The local Supabase services in `docker-compose.yml` are assembled from
-  Supabase's published self-hosting reference
-  (https://supabase.com/docs/guides/self-hosting/docker). If an image tag
-  has been retired upstream by the time you run this, bump it per that doc.
 - Chat, ingestion, and the real frontend app shell are intentionally not
   implemented here -- see `design.md` / `plan.md` in the orchestration task
   for the gate sequence.
+- This project previously ran a self-hosted Supabase stack (Postgres, Auth,
+  PostgREST, Realtime, Storage, Kong) via `docker-compose.yml`, per
+  `design.md`'s original assumption. It has since been switched to a hosted
+  Supabase project with bare local processes -- Docker artifacts
+  (`docker-compose.yml`, both `Dockerfile`s, `kong.yml`) have been removed.
+  `design.md` itself has not been retroactively edited; this README and
+  `gate-4.md` are the record of the change.
