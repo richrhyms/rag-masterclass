@@ -1,5 +1,5 @@
 import React from 'react'
-import { Document } from '@/lib/types'
+import type { Document } from '@/lib/types'
 import { Trash2 } from 'lucide-react'
 
 interface DocumentRowProps {

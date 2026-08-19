@@ -1,5 +1,5 @@
 import React from 'react'
-import { Document, DocStatus } from '@/lib/types'
+import type { Document } from '@/lib/types'
 import { DocumentRow } from './DocumentRow'
 
 interface DocumentListProps {

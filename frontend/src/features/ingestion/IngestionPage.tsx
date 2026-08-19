@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { apiRequest } from '@/lib/apiClient'
 import { supabase } from '@/lib/supabaseClient'
-import { Document, DocStatus } from '@/lib/types'
+import type { Document } from '@/lib/types'
 import { FileUpload } from './FileUpload'
 import { DocumentList } from './DocumentList'
 
@@ -70,20 +70,20 @@ export const IngestionPage: React.FC = () => {
         <p className="text-muted-foreground">
           Upload your documents to ground the assistant in your data. Supported formats: .txt, .md
         </p>
-      </div>>
+      </div>
 
       <FileUpload onUploadSuccess={handleUploadSuccess} />
 
       <div className="space-y-4">
         <h2 className="text-xl font-semibold">Documents</h2>
         {isLoading ? (
-          <div className="text-center py-8">Loading documents...</div>>
+          <div className="text-center py-8">Loading documents...</div>
         ) : error ? (
-          <div className="text-red-500 py-8 text-center">{error}</div>>
+          <div className="text-red-500 py-8 text-center">{error}</div>
         ) : (
           <DocumentList documents={documents} onDelete={handleDeleteDocument} />
         )}
-      </div>>
-    </div>>
+      </div>
+    </div>
   )
 }
