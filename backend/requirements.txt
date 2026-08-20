@@ -1,0 +1,26 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# Config / validation (NFR-5: Pydantic for structured outputs; FR-BE-9: env-only config)
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Supabase (Postgres + pgvector via PostgREST, Auth, Storage, Realtime)
+supabase==2.11.0
+
+# Auth: verify Supabase JWTs
+PyJWT==2.10.1
+
+# LLM: raw OpenAI-compatible SDK only -- NO LangChain/LangGraph/other orchestration
+# frameworks (FR-BE-3, NFR-5, hard constraint). Used against OpenAI (Module 1
+# Responses API) and any OpenAI-compatible Chat Completions + embeddings provider
+# (Module 2 -- OpenAI, OpenRouter, Ollama, LM Studio, etc.).
+# Bumped from 1.59.6 (G-4) -> 1.109.1 at G-5a: `client.responses` (Module 1)
+# was not present in 1.59.6; 1.109.1 is the newest 1.x release (pre-major-bump
+# to the 2.x/3.x client) and supports both Responses and Chat Completions.
+openai==1.109.1
+
+# Observability (FR-OBS-1/2; optional at runtime, absence must not break chat)
+langsmith==0.2.10
