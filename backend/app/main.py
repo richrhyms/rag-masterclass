@@ -13,6 +13,11 @@ Responsibilities scoped to this gate:
     (`routers.documents`) -- see the commented `include_router` calls below.
 
 This file intentionally implements no business endpoints beyond health.
+
+NOTE (G-9 integration): both `threads` (G-5a) and `documents` (G-5b) routers
+are registered below -- this is the resolved union of the parallel-branch
+router-registration seam described above, per design.md's "DevOps merges both
+at the deploy gate" and docs/INTEGRATION.md.
 """
 import logging
 
@@ -22,7 +27,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.config import get_settings
-from app.routers import health, threads
+from app.routers import documents, health, threads
 
 logger = logging.getLogger("rag_masterclass")
 
@@ -86,16 +91,12 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(health.router)
-    app.include_router(threads.router)
 
-    # --- Router registration seam ---
-    # G-5b (backend-2) registers document upload/list/delete endpoints on its
-    # own parallel branch (orchestration/.../backend-2-g5b):
-    #   from app.routers import documents
-    #   app.include_router(documents.router)
-    # Not registered here -- `documents.py` does not exist on this branch's
-    # tree. G-5a and G-5b are independent parallel branches per design.md;
-    # DevOps merges both at the deploy gate.
+    # --- Router registration seam (resolved at G-9 integration) ---
+    # G-5a (backend-1) registers thread/message/chat endpoints:
+    app.include_router(threads.router)
+    # G-5b (backend-2) registers document upload/list/delete endpoints:
+    app.include_router(documents.router)
 
     return app
 
