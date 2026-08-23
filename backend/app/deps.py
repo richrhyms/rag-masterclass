@@ -17,10 +17,32 @@ Two client factories are exposed:
   writes must always set `user_id` explicitly since RLS is bypassed by the
   service role.
 
-`get_current_user` verifies the incoming Supabase JWT (HS256, `SUPABASE_JWT_SECRET`)
-and returns the authenticated principal. Missing/invalid token -> 401
-`{"error": ..., "code": "unauthorized"}` per the API contract's standard error
-envelope.
+`get_current_user` verifies the incoming Supabase JWT and returns the authenticated
+principal. Missing/invalid token -> 401 `{"error": ..., "code": "unauthorized"}` per
+the API contract's standard error envelope.
+
+## JWT verification strategy (G-10a fix)
+
+The real hosted Supabase project has asymmetric JWT signing-keys enabled and issues
+**ES256**-signed access tokens (confirmed live: token header is
+`{"alg": "ES256", "kid": "..."}`, the project's JWKS endpoint publishes exactly one
+EC/P-256 verification key under that `kid`). The previous implementation verified
+tokens as HS256 against `SUPABASE_JWT_SECRET`, which is a no-op against real tokens
+(they are never HS256) and was rejecting every real signed-in user with 401
+(QA gate-8, CRITICAL DEFECT 1).
+
+Tokens are now verified as ES256 against the project's published JWKS, fetched from
+`${SUPABASE_URL}/auth/v1/.well-known/jwks.json` (confirmed live at this exact path;
+the project ref is never hardcoded -- the URL is always derived from the
+`SUPABASE_URL` env var). `aud` is validated as `"authenticated"` and `iss` as
+`"${SUPABASE_URL}/auth/v1"`, matching a real, freshly-issued Supabase access token
+exactly (both confirmed live against the hosted project, not just from docs).
+
+The JWKS key set is cached in-process (`PyJWKClient`, TTL-based; see
+`_JWKS_CACHE_TTL_SECONDS`) so normal request traffic does not refetch it every call.
+On a `kid` miss (e.g. after Supabase rotates its signing key), `PyJWKClient`
+transparently refetches the key set once before giving up, so key rotation does not
+require a process restart.
 """
 from dataclasses import dataclass
 from functools import lru_cache
@@ -29,11 +51,41 @@ from uuid import UUID
 import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt import PyJWKClient
+from jwt.exceptions import PyJWKClientError
 from supabase import Client, create_client
 
 from app.config import Settings, get_settings
 
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+# How long PyJWKClient keeps a fetched JWKS response in-process before treating it
+# as stale and refetching on the next lookup. Independent of, and shorter than, the
+# automatic single-retry-on-kid-miss behavior below (that retry always bypasses this
+# TTL and fetches fresh, so a genuine key rotation is picked up immediately, not
+# after this TTL elapses).
+_JWKS_CACHE_TTL_SECONDS = 600  # 10 minutes
+
+
+def _jwks_url(settings: Settings) -> str:
+    """Derive the project's JWKS endpoint from SUPABASE_URL. Never hardcode the
+    project ref -- this must work for any Supabase project this backend points at."""
+    return f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json"
+
+
+def _expected_issuer(settings: Settings) -> str:
+    return f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1"
+
+
+@lru_cache
+def _jwks_client(jwks_url: str) -> PyJWKClient:
+    """Module-level cached JWKS client -- one per distinct JWKS URL (effectively a
+    singleton per SUPABASE_URL in normal operation, mirroring the pattern already
+    used for the service-role Supabase client below). `PyJWKClient` itself caches
+    the fetched key set for `lifespan` seconds and transparently refetches once on a
+    `kid` miss before raising, satisfying the "cache with TTL + refetch-once-on-
+    rotation" requirement without hand-rolled cache bookkeeping."""
+    return PyJWKClient(jwks_url, cache_keys=True, lifespan=_JWKS_CACHE_TTL_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -50,6 +102,35 @@ def _unauthorized(detail: str = "Missing or invalid authentication token") -> HT
     )
 
 
+def _verify_token(token: str, settings: Settings) -> dict:
+    """Verify a Supabase-issued access token's ES256 signature against the
+    project's published JWKS (selecting the key by the token's `kid` header),
+    then validate standard claims (`exp`, `aud="authenticated"`,
+    `iss="${SUPABASE_URL}/auth/v1"`) exactly as a real Supabase access token sets
+    them. Returns the decoded claims on success. Raises 401 (standard error
+    envelope) on any failure: missing/malformed token, unknown `kid`, bad
+    signature, wrong algorithm, expired token, or a claim mismatch."""
+    jwks_client = _jwks_client(_jwks_url(settings))
+    try:
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
+    except (PyJWKClientError, jwt.PyJWTError) as exc:
+        raise _unauthorized(f"Invalid token: {exc}") from exc
+
+    try:
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["ES256"],
+            audience="authenticated",
+            issuer=_expected_issuer(settings),
+            options={"require": ["sub", "exp"]},
+        )
+    except jwt.PyJWTError as exc:
+        raise _unauthorized(f"Invalid token: {exc}") from exc
+
+    return claims
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     settings: Settings = Depends(get_settings),
@@ -60,16 +141,7 @@ async def get_current_user(
         raise _unauthorized()
 
     token = credentials.credentials
-    try:
-        claims = jwt.decode(
-            token,
-            settings.SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated",
-            options={"require": ["sub", "exp"]},
-        )
-    except jwt.PyJWTError as exc:
-        raise _unauthorized(f"Invalid token: {exc}") from exc
+    claims = _verify_token(token, settings)
 
     try:
         user_id = UUID(claims["sub"])
@@ -97,16 +169,7 @@ async def get_db(
     # Fail fast on an invalid token before handing back a client (keeps the 401
     # contract identical whether a caller only reaches for `get_db` and not
     # `get_current_user`).
-    try:
-        jwt.decode(
-            token,
-            settings.SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated",
-            options={"require": ["sub", "exp"]},
-        )
-    except jwt.PyJWTError as exc:
-        raise _unauthorized(f"Invalid token: {exc}") from exc
+    _verify_token(token, settings)
 
     client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
     client.postgrest.auth(token)

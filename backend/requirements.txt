@@ -10,8 +10,12 @@ pydantic-settings==2.7.1
 # Supabase (Postgres + pgvector via PostgREST, Auth, Storage, Realtime)
 supabase==2.11.0
 
-# Auth: verify Supabase JWTs
+# Auth: verify Supabase JWTs. The hosted project issues ES256 (asymmetric)
+# access tokens signed with an EC (P-256) key published at the project's JWKS
+# endpoint; `cryptography` is required by PyJWT to verify ES256 signatures
+# (equivalent to the `PyJWT[crypto]` extra).
 PyJWT==2.10.1
+cryptography==44.0.0
 
 # LLM: raw OpenAI-compatible SDK only -- NO LangChain/LangGraph/other orchestration
 # frameworks (FR-BE-3, NFR-5, hard constraint). Used against OpenAI (Module 1
