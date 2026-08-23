@@ -1,7 +1,11 @@
 import type { ChatSSEEvent } from './types'
 
+// `url` must be a fully-resolved request URL (base-URL + `/api` + path) --
+// build it with `apiUrl()` from `./apiClient` at the call site so the SSE
+// request follows the same single base-URL convention as every other REST
+// call (see the comment block at the top of `apiClient.ts`).
 export async function consumeChatStream(
-  endpoint: string,
+  url: string,
   message: string,
   onEvent: (event: ChatSSEEvent) => void,
   onError: (error: { error: string; code: string }) => void
@@ -11,7 +15,7 @@ export async function consumeChatStream(
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) throw new Error('No active session')
 
-    const response = await fetch(endpoint, {
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${session.access_token}`,
