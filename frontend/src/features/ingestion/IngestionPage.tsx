@@ -13,7 +13,7 @@ export const IngestionPage: React.FC = () => {
   const fetchDocuments = async () => {
     try {
       setIsLoading(true)
-      const data = await apiRequest<{ documents: Document[] }>('/api/documents')
+      const data = await apiRequest<{ documents: Document[] }>('/documents')
       setDocuments(data.documents)
     } catch (err: any) {
       setError(err.error || 'Failed to load documents')
@@ -55,7 +55,7 @@ export const IngestionPage: React.FC = () => {
 
   const handleDeleteDocument = async (id: string) => {
     try {
-      await apiRequest<void>(`/api/documents/${id}`, { method: 'DELETE' })
+      await apiRequest<void>(`/documents/${id}`, { method: 'DELETE' })
       // Realtime should handle the update, but we can also update local state for snappiness
       setDocuments((prev) => prev.filter((doc) => doc.id !== id))
     } catch (err: any) {

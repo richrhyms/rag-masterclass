@@ -20,7 +20,7 @@ export function ThreadList({ activeThreadId, onSelectThread }: ThreadListProps) 
 
   async function fetchThreads() {
     try {
-      const data = await apiRequest<{ threads: Thread[] }>('/api/threads')
+      const data = await apiRequest<{ threads: Thread[] }>('/threads')
       setThreads(data.threads)
     } catch (e) {
       console.error('Failed to fetch threads', e)
@@ -32,7 +32,7 @@ export function ThreadList({ activeThreadId, onSelectThread }: ThreadListProps) 
   async function createThread() {
     setCreating(true)
     try {
-      const newThread = await apiRequest<Thread>('/api/threads', {
+      const newThread = await apiRequest<Thread>('/threads', {
         method: 'POST',
         body: JSON.stringify({ title: null }),
       })

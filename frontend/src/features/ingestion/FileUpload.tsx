@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import { apiUrl } from '@/lib/apiClient'
 
 interface FileUploadProps {
   onUploadSuccess: () => void
@@ -18,7 +19,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
       const formData = new FormData()
       formData.append('file', file)
 
-      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/documents`, {
+      const response = await fetch(apiUrl('/documents'), {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${jwt}`,

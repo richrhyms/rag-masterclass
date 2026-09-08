@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
-import { apiRequest } from '@/lib/apiClient'
+import { apiRequest, apiUrl } from '@/lib/apiClient'
 import { consumeChatStream } from '@/lib/sse'
 import type { Message, ChatSSEEvent } from '@/lib/types'
 import { MessageInput } from './MessageInput'
@@ -36,7 +36,7 @@ export function ChatWindow({ threadId }: ChatWindowProps) {
     setLoading(true)
     setError(null)
     try {
-      const data = await apiRequest<{ messages: Message[] }>(`/api/threads/${threadId}/messages`)
+      const data = await apiRequest<{ messages: Message[] }>(`/threads/${threadId}/messages`)
       setMessages(data.messages)
     } catch (e: any) {
       setError(e.error || 'Failed to load messages')
@@ -60,7 +60,7 @@ export function ChatWindow({ threadId }: ChatWindowProps) {
 
     try {
       await consumeChatStream(
-        `/api/threads/${threadId}/chat`,
+        apiUrl(`/threads/${threadId}/chat`),
         content,
         (event: ChatSSEEvent) => {
           if (event.type === 'token') {
