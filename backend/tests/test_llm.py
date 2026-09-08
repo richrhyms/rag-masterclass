@@ -103,9 +103,10 @@ async def test_embed_text_calls_configured_embedding_client(monkeypatch: pytest.
         data = [_FakeEmbeddingItem()]
 
     class _FakeEmbeddings:
-        async def create(self, model: str, input: str):  # noqa: A002 - matches SDK signature
+        async def create(self, model: str, input: str, dimensions: int):  # noqa: A002 - matches SDK signature
             assert model == "text-embedding-3-small"
             assert input == "hello world"
+            assert dimensions == settings.EMBEDDING_DIM
             return _FakeEmbeddingResponse()
 
     class _FakeClient:

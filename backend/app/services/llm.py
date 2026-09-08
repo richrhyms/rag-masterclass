@@ -86,7 +86,21 @@ async def embed_text(text: str, settings: Settings) -> list[float]:
     (unconfigured) or whatever the SDK raises on a provider-side failure --
     `services/retrieval.py` is responsible for catching both and degrading to
     an empty retrieval result (DD-2); this function itself does not swallow
-    errors so other callers can decide their own handling."""
+    errors so other callers can decide their own handling.
+
+    `dimensions` is passed explicitly as EMBEDDING_DIM rather than left to the
+    provider's default. Some providers (e.g. OpenAI's text-embedding-3-small)
+    default to exactly EMBEDDING_DIM's default of 1536 so this is a no-op for
+    them, but others (e.g. Gemini's gemini-embedding-001, native 3072) return
+    a different size unless asked -- which would silently break the fixed
+    vector(EMBEDDING_DIM) pgvector column. Requesting the dimension explicitly
+    keeps LLM_*/EMBEDDING_* independently swappable to any OpenAI-compatible
+    provider without a schema migration, as long as the provider supports the
+    `dimensions` parameter for its embedding model."""
     client = get_embedding_client(settings)
-    response = await client.embeddings.create(model=settings.EMBEDDING_MODEL, input=text)
+    response = await client.embeddings.create(
+        model=settings.EMBEDDING_MODEL,
+        input=text,
+        dimensions=settings.EMBEDDING_DIM,
+    )
     return list(response.data[0].embedding)
