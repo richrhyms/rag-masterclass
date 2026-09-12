@@ -24,8 +24,7 @@ export function LoginPage() {
     setLoading(false)
   }
 
-  async function handleSignUp(e: React.FormEvent) {
-    e.preventDefault()
+  async function handleSignUp() {
     setError(null)
     setLoading(true)
     const { error } = await signUp(email, password)
@@ -95,24 +94,14 @@ export function LoginPage() {
           <p className="text-sm text-zinc-500">
             Don't have an account?{' '}
             <button
-              onClick={(e) => {
-                e.preventDefault()
-                // This is a simplified sign-up trigger
-              }}
-              className="text-indigo-600 font-medium hover:underline"
+              type="button"
+              onClick={handleSignUp}
+              disabled={loading}
+              className="text-indigo-600 font-medium hover:underline disabled:opacity-50"
             >
               Sign Up
             </button>
           </p>
-          {/* Simplified Sign Up form toggle could be here, for now we just have a button */}
-          <form onSubmit={handleSignUp} className="mt-4 pt-4 border-t">
-             <button
-               type="submit"
-               className="text-xs text-zinc-400 hover:text-indigo-600 transition-colors"
-             >
-               Create new account with these credentials
-             </button>
-          </form>
         </div>
       </div>
     </div>
