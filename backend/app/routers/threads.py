@@ -25,12 +25,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 from supabase import Client
 
 from app.config import Settings, get_settings
 from app.deps import CurrentUser, get_current_user, get_db
 from app.models import MessageOut, ThreadOut
-from app.services.chat import generate_chat_stream
+from app.services.chat import _maybe_set_thread_title, generate_chat_stream
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
@@ -155,8 +156,17 @@ async def chat(
         user_message_id=user_message_id,
         user_message_content=message,
     )
+    # Thread auto-titling runs as a genuine background task (not inline in
+    # the generator) because its latency is observed to vary wildly (see
+    # _generate_thread_title's docstring) -- attaching it here means the
+    # response closes as soon as the terminal SSE event is flushed,
+    # regardless of how long titling ends up taking.
+    title_task = BackgroundTask(
+        _maybe_set_thread_title, db, settings, thread_id, message
+    )
     return StreamingResponse(
         stream,
+        background=title_task,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

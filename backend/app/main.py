@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.config import get_settings
-from app.routers import documents, health, threads
+from app.routers import documents, health, settings, threads
 
 logger = logging.getLogger("rag_masterclass")
 
@@ -97,6 +97,8 @@ def create_app() -> FastAPI:
     app.include_router(threads.router)
     # G-5b (backend-2) registers document upload/list/delete endpoints:
     app.include_router(documents.router)
+    # Chat guardrail settings (restrict-to-documents toggle + threshold):
+    app.include_router(settings.router)
 
     return app
 

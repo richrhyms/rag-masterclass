@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { apiRequest } from '@/lib/apiClient'
+import { supabase } from '@/lib/supabaseClient'
 import type { Thread } from '@/lib/types'
 import { MessageSquare, Plus, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -9,6 +10,10 @@ interface ThreadListProps {
   onSelectThread: (thread: Thread) => void
 }
 
+function _sortByUpdatedAtDesc(threads: Thread[]): Thread[] {
+  return [...threads].sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+}
+
 export function ThreadList({ activeThreadId, onSelectThread }: ThreadListProps) {
   const [threads, setThreads] = useState<Thread[]>([])
   const [loading, setLoading] = useState(true)
@@ -16,6 +21,42 @@ export function ThreadList({ activeThreadId, onSelectThread }: ThreadListProps) 
 
   useEffect(() => {
     fetchThreads()
+
+    // Live-updates a thread's title the moment the backend's background
+    // auto-titling task (services/chat.py::_maybe_set_thread_title)
+    // actually finishes -- that task's latency genuinely varies (observed
+    // 3-70+ seconds), so a fixed-delay client-side refresh would either
+    // fire too early or add needless lag. Subscribing to real change events
+    // is the correct fix, not a timing workaround -- same pattern already
+    // used for live document status in features/ingestion/IngestionPage.tsx.
+    const channel = supabase
+      .channel('thread-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'thread' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            setThreads((prev) =>
+              prev.some((t) => t.id === (payload.new as Thread).id)
+                ? prev
+                : _sortByUpdatedAtDesc([payload.new as Thread, ...prev])
+            )
+          } else if (payload.eventType === 'UPDATE') {
+            setThreads((prev) =>
+              _sortByUpdatedAtDesc(
+                prev.map((t) => (t.id === (payload.new as Thread).id ? (payload.new as Thread) : t))
+              )
+            )
+          } else if (payload.eventType === 'DELETE') {
+            setThreads((prev) => prev.filter((t) => t.id !== (payload.old as Thread).id))
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [])
 
   async function fetchThreads() {
@@ -36,7 +77,10 @@ export function ThreadList({ activeThreadId, onSelectThread }: ThreadListProps) 
         method: 'POST',
         body: JSON.stringify({ title: null }),
       })
-      setThreads([newThread, ...threads])
+      // Realtime's INSERT handler above will also deliver this row, but
+      // de-dupes by id, so updating local state here too (for snappiness)
+      // is safe.
+      setThreads((prev) => [newThread, ...prev])
       onSelectThread(newThread)
     } catch (e) {
       console.error('Failed to create thread', e)

@@ -3,6 +3,7 @@ import { apiRequest, apiUrl } from '@/lib/apiClient'
 import { consumeChatStream } from '@/lib/sse'
 import type { Message, ChatSSEEvent } from '@/lib/types'
 import { MessageInput } from './MessageInput'
+import { MarkdownMessage } from './MarkdownMessage'
 import { Loader2, AlertCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -141,7 +142,7 @@ export function ChatWindow({ threadId }: ChatWindowProps) {
                   ? "bg-indigo-600 text-white rounded-tr-none"
                   : "bg-white border text-zinc-800 rounded-tl-none shadow-sm"
               )}>
-                {msg.content}
+                {msg.role === 'assistant' ? <MarkdownMessage content={msg.content} /> : msg.content}
               </div>
             </div>
           ))

@@ -26,6 +26,11 @@ export interface Message {
   created_at: string
 }
 
+export interface ChatSettings {
+  restrict_to_documents: boolean
+  min_relevance_score: number
+}
+
 export type ChatSSEEvent =
   | { type: 'start'; thread_id: string; user_message_id: string }
   | { type: 'token'; delta: string }
