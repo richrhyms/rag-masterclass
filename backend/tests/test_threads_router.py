@@ -91,6 +91,57 @@ def test_list_threads_only_returns_current_users_threads(client: TestClient, fak
     assert resp.json()["threads"] == []
 
 
+def test_delete_thread_removes_row(client: TestClient, fake_db: FakeSupabaseClient) -> None:
+    thread_id = uuid.uuid4()
+    fake_db.tables["thread"] = [
+        {
+            "id": str(thread_id),
+            "user_id": str(USER_ID),
+            "title": "to delete",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+
+    resp = client.delete(f"/api/threads/{thread_id}")
+
+    assert resp.status_code == 204
+    assert fake_db.tables["thread"] == []
+
+
+def test_delete_thread_not_found_returns_404(client: TestClient, fake_db: FakeSupabaseClient) -> None:
+    resp = client.delete(f"/api/threads/{uuid.uuid4()}")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "not_found"
+
+
+def test_delete_thread_owned_by_another_user_returns_404(client: TestClient, fake_db: FakeSupabaseClient) -> None:
+    thread_id = uuid.uuid4()
+    fake_db.tables["thread"] = [
+        {
+            "id": str(thread_id),
+            "user_id": str(OTHER_USER_ID),
+            "title": "not mine",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+
+    resp = client.delete(f"/api/threads/{thread_id}")
+
+    assert resp.status_code == 404
+    # not actually deleted -- ownership check failed before the delete ran
+    assert fake_db.tables["thread"] == [
+        {
+            "id": str(thread_id),
+            "user_id": str(OTHER_USER_ID),
+            "title": "not mine",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+
+
 def test_list_messages_404_when_thread_not_owned_or_missing(client: TestClient, fake_db: FakeSupabaseClient) -> None:
     other_thread_id = uuid.uuid4()
     fake_db.tables["thread"] = [

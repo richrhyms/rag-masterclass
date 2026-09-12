@@ -3,10 +3,15 @@ Thread + message + chat (SSE) endpoints (design.md "API Contracts" /
 "Module Boundaries": `backend/app/routers/threads.py`, owner: backend-1,
 G-5a). Implements exactly:
 
-  GET  /api/threads                       -> { "threads": [...] }
-  POST /api/threads                       -> 201, created thread
-  GET  /api/threads/{thread_id}/messages  -> { "messages": [...] }
-  POST /api/threads/{thread_id}/chat      -> text/event-stream (SSE)
+  GET    /api/threads                       -> { "threads": [...] }
+  POST   /api/threads                       -> 201, created thread
+  GET    /api/threads/{thread_id}/messages  -> { "messages": [...] }
+  POST   /api/threads/{thread_id}/chat      -> text/event-stream (SSE)
+  DELETE /api/threads/{thread_id}           -> 204 (post-G-5a addition:
+                                                the UI had no way to remove a
+                                                conversation; `message.thread_id`
+                                                cascades via FK, no extra cleanup
+                                                needed)
 
 All four require auth (`Authorization: Bearer <token>`). Errors use the
 standard flat envelope `{ "error": string, "code": string }` from design.md's
@@ -91,6 +96,32 @@ async def create_thread(
 ) -> ThreadOut:
     response = db.table("thread").insert({"user_id": str(user.id), "title": body.title}).execute()
     return ThreadOut(**response.data[0])
+
+
+@router.delete("/{thread_id}", status_code=204)
+async def delete_thread(
+    thread_id: UUID,
+    user: CurrentUser = Depends(get_current_user),
+    db: Client = Depends(get_db),
+):
+    """Deletes the `thread` row; `message.thread_id` cascades via FK (see
+    supabase/migrations/20260818000002_tables.sql) so no separate message
+    cleanup is needed. Double-scoped by user_id (NFR-13), same as
+    `_thread_exists` above -- a thread owned by another user is
+    indistinguishable from a missing one, both 404. The frontend's
+    Realtime subscription (ThreadList.tsx) already handles the resulting
+    DELETE `postgres_changes` event, so no extra client-side refresh is
+    needed beyond issuing this request."""
+    response = (
+        db.table("thread")
+        .delete()
+        .eq("id", str(thread_id))
+        .eq("user_id", str(user.id))
+        .execute()
+    )
+    if not response.data:
+        return _not_found()
+    return None
 
 
 @router.get("/{thread_id}/messages")

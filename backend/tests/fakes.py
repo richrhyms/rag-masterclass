@@ -43,6 +43,10 @@ class _FakeQuery:
         self._payload = payload
         return self
 
+    def delete(self) -> "_FakeQuery":
+        self._mode = "delete"
+        return self
+
     def eq(self, key: str, value: Any) -> "_FakeQuery":
         self._filtered = [row for row in self._filtered if str(row.get(key)) == str(value)]
         return self
@@ -83,6 +87,12 @@ class _FakeQuery:
                     row.update(self._payload or {})
                     updated.append(row)
             return FakeResult(updated)
+
+        if self._mode == "delete":
+            matched_ids = {id(row) for row in self._filtered}
+            deleted = [row for row in self._rows if id(row) in matched_ids]
+            self._rows[:] = [row for row in self._rows if id(row) not in matched_ids]
+            return FakeResult(deleted)
 
         rows = list(self._filtered)
         if self._order_key:

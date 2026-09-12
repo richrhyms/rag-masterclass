@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type MouseEvent } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { apiRequest } from '@/lib/apiClient'
 import { supabase } from '@/lib/supabaseClient'
 import type { Thread } from '@/lib/types'
-import { MessageSquare, Plus, Loader2 } from 'lucide-react'
+import { MessageSquare, Plus, Loader2, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface ThreadListProps {
@@ -18,6 +19,8 @@ export function ThreadList({ activeThreadId, onSelectThread }: ThreadListProps) 
   const [threads, setThreads] = useState<Thread[]>([])
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     fetchThreads()
@@ -89,6 +92,29 @@ export function ThreadList({ activeThreadId, onSelectThread }: ThreadListProps) 
     }
   }
 
+  async function handleDeleteThread(e: MouseEvent<HTMLButtonElement>, thread: Thread) {
+    e.stopPropagation() // don't also trigger onSelectThread on the parent button
+    if (!confirm(`Delete "${thread.title || 'New Conversation'}"? This cannot be undone.`)) {
+      return
+    }
+    setDeletingId(thread.id)
+    try {
+      await apiRequest<void>(`/threads/${thread.id}`, { method: 'DELETE' })
+      // Realtime's DELETE handler above will also deliver this removal, but
+      // updating local state here too (for snappiness) is safe -- the
+      // handler de-dupes by id.
+      setThreads((prev) => prev.filter((t) => t.id !== thread.id))
+      if (activeThreadId === thread.id) {
+        navigate('/chat')
+      }
+    } catch (e: any) {
+      console.error('Failed to delete thread', e)
+      alert(`Failed to delete conversation: ${e.error || 'Unknown error'}`)
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center p-4">
@@ -120,24 +146,40 @@ export function ThreadList({ activeThreadId, onSelectThread }: ThreadListProps) 
           </div>
         ) : (
           threads.map((thread) => (
-            <button
+            <div
               key={thread.id}
-              onClick={() => onSelectThread(thread)}
               className={cn(
-                "w-full flex items-center gap-3 p-3 rounded-lg text-left transition-all group",
+                "w-full flex items-center gap-1 rounded-lg text-left transition-all group",
                 activeThreadId === thread.id
                   ? "bg-indigo-50 text-indigo-700"
                   : "hover:bg-zinc-100 text-zinc-600 hover:text-zinc-900"
               )}
             >
-              <MessageSquare className={cn(
-                "w-4 h-4 shrink-0",
-                activeThreadId === thread.id ? "text-indigo-500" : "text-zinc-400 group-hover:text-zinc-500"
-              )} />
-              <span className="truncate text-sm font-medium">
-                {thread.title || 'New Conversation'}
-              </span>
-            </button>
+              <button
+                onClick={() => onSelectThread(thread)}
+                className="flex-1 min-w-0 flex items-center gap-3 p-3"
+              >
+                <MessageSquare className={cn(
+                  "w-4 h-4 shrink-0",
+                  activeThreadId === thread.id ? "text-indigo-500" : "text-zinc-400 group-hover:text-zinc-500"
+                )} />
+                <span className="truncate text-sm font-medium">
+                  {thread.title || 'New Conversation'}
+                </span>
+              </button>
+              <button
+                onClick={(e) => handleDeleteThread(e, thread)}
+                disabled={deletingId === thread.id}
+                title="Delete conversation"
+                className="shrink-0 p-2 mr-1 text-zinc-400 opacity-0 group-hover:opacity-100 hover:text-red-500 transition-colors disabled:opacity-50"
+              >
+                {deletingId === thread.id ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Trash2 className="w-4 h-4" />
+                )}
+              </button>
+            </div>
           ))
         )}
       </div>
