@@ -73,7 +73,9 @@ def test_upload_txt_returns_202_and_queues_document(client: TestClient, fake_cli
     [call] = client.pipeline_calls  # type: ignore[attr-defined]
     assert call["document_id"] == uuid.UUID(body["id"])
     assert call["user_id"] == USER_ID
-    assert call["text"] == "hello world, this is a test document."
+    assert call["raw"] == b"hello world, this is a test document."
+    assert call["content_type"] == "text/plain"
+    assert call["filename"] == "notes.txt"
 
 
 def test_upload_md_is_accepted(client: TestClient) -> None:
@@ -88,10 +90,48 @@ def test_upload_md_is_accepted(client: TestClient) -> None:
 def test_upload_rejects_unsupported_extension(client: TestClient) -> None:
     resp = client.post(
         "/api/documents",
-        files={"file": ("scan.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        files={"file": ("image.png", b"\x89PNG fake", "image/png")},
     )
     assert resp.status_code == 415
     assert resp.json()["detail"]["code"] == "unsupported_file_type"
+
+
+def test_upload_pdf_is_accepted_without_eager_utf8_validation(client: TestClient) -> None:
+    # Binary content that is NOT valid UTF-8 -- must not be rejected at
+    # upload time for a binary format (unlike .txt/.md); the router only
+    # eagerly UTF-8-validates plain-text content types. Real extraction
+    # happens in the background pipeline (pypdf), covered separately in
+    # test_ingestion_pipeline.py.
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("report.pdf", b"%PDF-1.4\xff\xfe not real pdf bytes", "application/pdf")},
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["content_type"] == "application/pdf"
+
+
+def test_upload_rejects_docx_and_html(client: TestClient) -> None:
+    # Not supported by the pypdf-based fallback (docling would have covered
+    # these but has no PyTorch wheel for this platform -- see
+    # services/ingestion.py's _default_extract docstring).
+    resp = client.post(
+        "/api/documents",
+        files={
+            "file": (
+                "doc.docx",
+                b"fake docx bytes",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert resp.status_code == 415
+
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("page.html", b"<html><body>hi</body></html>", "text/html")},
+    )
+    assert resp.status_code == 415
 
 
 def test_upload_rejects_oversized_file(fake_client: FakeSupabaseClient, monkeypatch) -> None:
@@ -242,3 +282,96 @@ def test_delete_document_owned_by_another_user_returns_404(
     assert resp.status_code == 404
     # Row must remain untouched -- not owned by the caller.
     assert len(fake_client.tables["document"]) == 1
+
+
+# --- PATCH /api/documents/{document_id} (document selection) ---
+
+
+def test_patch_document_active_toggles_selection(client: TestClient, fake_client: FakeSupabaseClient) -> None:
+    document_id = uuid.uuid4()
+    fake_client.table("document").insert(
+        {
+            "id": str(document_id),
+            "user_id": str(USER_ID),
+            "filename": "f.txt",
+            "status": "completed",
+            "byte_size": 10,
+        }
+    ).execute()
+
+    resp = client.patch(f"/api/documents/{document_id}", json={"active": False})
+
+    assert resp.status_code == 200
+    assert resp.json()["active"] is False
+    assert fake_client.tables["document"][0]["active"] is False
+
+
+def test_patch_document_active_not_found_returns_404(client: TestClient) -> None:
+    resp = client.patch(f"/api/documents/{uuid.uuid4()}", json={"active": False})
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["code"] == "not_found"
+
+
+def test_patch_document_active_owned_by_another_user_returns_404(
+    client: TestClient, fake_client: FakeSupabaseClient
+) -> None:
+    document_id = uuid.uuid4()
+    fake_client.table("document").insert(
+        {
+            "id": str(document_id),
+            "user_id": str(OTHER_USER_ID),
+            "filename": "f.txt",
+            "status": "completed",
+        }
+    ).execute()
+
+    resp = client.patch(f"/api/documents/{document_id}", json={"active": False})
+
+    assert resp.status_code == 404
+    # Row must remain untouched -- not owned by the caller.
+    assert fake_client.tables["document"][0]["active"] is True
+
+
+# --- PATCH /api/documents (bulk select-all / deselect-all) ---
+
+
+def test_patch_all_documents_active_updates_every_owned_row(
+    client: TestClient, fake_client: FakeSupabaseClient
+) -> None:
+    for filename in ["a.txt", "b.txt"]:
+        fake_client.table("document").insert(
+            {
+                "id": str(uuid.uuid4()),
+                "user_id": str(USER_ID),
+                "filename": filename,
+                "status": "completed",
+                "byte_size": 10,
+            }
+        ).execute()
+    # A document owned by someone else must be unaffected by the caller's bulk update.
+    other_document_id = uuid.uuid4()
+    fake_client.table("document").insert(
+        {
+            "id": str(other_document_id),
+            "user_id": str(OTHER_USER_ID),
+            "filename": "other.txt",
+            "status": "completed",
+            "byte_size": 10,
+        }
+    ).execute()
+
+    resp = client.patch("/api/documents", json={"active": False})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["documents"]) == 2
+    assert all(doc["active"] is False for doc in body["documents"])
+
+    other_row = next(row for row in fake_client.tables["document"] if row["id"] == str(other_document_id))
+    assert other_row["active"] is True
+
+
+def test_patch_all_documents_active_empty_for_new_user(client: TestClient) -> None:
+    resp = client.patch("/api/documents", json={"active": False})
+    assert resp.status_code == 200
+    assert resp.json() == {"documents": []}

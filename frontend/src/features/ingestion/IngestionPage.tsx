@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabaseClient'
 import type { Document } from '@/lib/types'
 import { FileUpload } from './FileUpload'
 import { DocumentList } from './DocumentList'
+import { GuardrailToggle } from './GuardrailToggle'
 
 export const IngestionPage: React.FC = () => {
   const [documents, setDocuments] = useState<Document[]>([])
@@ -63,14 +64,45 @@ export const IngestionPage: React.FC = () => {
     }
   }
 
+  const handleToggleActive = async (id: string, active: boolean) => {
+    // optimistic update; Realtime will also deliver the same row change
+    setDocuments((prev) => prev.map((doc) => (doc.id === id ? { ...doc, active } : doc)))
+    try {
+      await apiRequest<Document>(`/documents/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ active }),
+      })
+    } catch (err: any) {
+      setDocuments((prev) => prev.map((doc) => (doc.id === id ? { ...doc, active: !active } : doc)))
+      alert(`Failed to update document: ${err.error || 'Unknown error'}`)
+    }
+  }
+
+  const handleToggleAll = async (active: boolean) => {
+    const previous = documents
+    setDocuments((prev) => prev.map((doc) => ({ ...doc, active })))
+    try {
+      const data = await apiRequest<{ documents: Document[] }>('/documents', {
+        method: 'PATCH',
+        body: JSON.stringify({ active }),
+      })
+      setDocuments(data.documents)
+    } catch (err: any) {
+      setDocuments(previous)
+      alert(`Failed to update documents: ${err.error || 'Unknown error'}`)
+    }
+  }
+
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-8">
       <div className="space-y-2">
         <h1 className="text-3xl font-bold tracking-tight">Knowledge Ingestion</h1>
         <p className="text-muted-foreground">
-          Upload your documents to ground the assistant in your data. Supported formats: .txt, .md
+          Upload your documents to ground the assistant in your data. Supported formats: .txt, .md, .pdf
         </p>
       </div>
+
+      <GuardrailToggle />
 
       <FileUpload onUploadSuccess={handleUploadSuccess} />
 
@@ -81,7 +113,12 @@ export const IngestionPage: React.FC = () => {
         ) : error ? (
           <div className="text-red-500 py-8 text-center">{error}</div>
         ) : (
-          <DocumentList documents={documents} onDelete={handleDeleteDocument} />
+          <DocumentList
+            documents={documents}
+            onDelete={handleDeleteDocument}
+            onToggleActive={handleToggleActive}
+            onToggleAll={handleToggleAll}
+          />
         )}
       </div>
     </div>

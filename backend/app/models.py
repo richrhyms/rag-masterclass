@@ -30,6 +30,11 @@ class DocumentOut(BaseModel):
     error: str | None
     created_at: datetime
     updated_at: datetime
+    # Document selection (post-G-4 addition): whether this document's chunks
+    # are eligible for chat-time retrieval (see match_chunks in
+    # supabase/migrations). Defaults true to match the DB column default, so
+    # existing rows/fixtures without it deserialize unchanged.
+    active: bool = True
 
 
 class MessageOut(BaseModel):

@@ -69,6 +69,7 @@ class _FakeTableQuery:
                 row.setdefault("updated_at", now)
                 row.setdefault("chunk_count", 0)
                 row.setdefault("error", None)
+                row.setdefault("active", True)
                 self._rows.append(row)
                 inserted.append(row)
             return FakeResult(inserted)

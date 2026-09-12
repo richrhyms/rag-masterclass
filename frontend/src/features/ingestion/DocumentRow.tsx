@@ -5,9 +5,10 @@ import { Trash2 } from 'lucide-react'
 interface DocumentRowProps {
   doc: Document
   onDelete: (id: string) => void
+  onToggleActive: (id: string, active: boolean) => void
 }
 
-export const DocumentRow: React.FC<DocumentRowProps> = ({ doc, onDelete }) => {
+export const DocumentRow: React.FC<DocumentRowProps> = ({ doc, onDelete, onToggleActive }) => {
   const statusColors = {
     queued: 'bg-gray-100 text-gray-600',
     processing: 'bg-blue-100 text-blue-600',
@@ -25,6 +26,15 @@ export const DocumentRow: React.FC<DocumentRowProps> = ({ doc, onDelete }) => {
 
   return (
     <tr className="hover:bg-gray-50 transition-colors">
+      <td className="px-4 py-3">
+        <input
+          type="checkbox"
+          checked={doc.active}
+          onChange={(e) => onToggleActive(doc.id, e.target.checked)}
+          title={doc.active ? 'Used in chat retrieval' : 'Excluded from chat retrieval'}
+          className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+        />
+      </td>
       <td className="px-4 py-3 font-medium">{doc.filename}</td>
       <td className="px-4 py-3">
         <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[doc.status]}`}>

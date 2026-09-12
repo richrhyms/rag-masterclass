@@ -102,6 +102,56 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
     return chunks
 
 
+# --- Text extraction (partial PRD Module 5 pulled forward: PDF only) ---
+#
+# `docling` (layout-aware, covers PDF/DOCX/HTML) was tried first but could
+# not be installed: it depends on PyTorch, which has no published wheel for
+# Intel Mac + Python 3.13 -- a hard platform incompatibility, not something
+# fixable by pinning versions differently. Fell back to `pypdf`: PDF only,
+# no ML/layout models, no OCR (scanned/image-only PDFs yield no text), no
+# table-layout preservation -- adequate for grounding typical text-based
+# PDFs, which is this app's actual need. DOCX/HTML are NOT supported by this
+# fallback and are rejected at upload time (see documents.py).
+
+# Content types that are already plain text -- decoded directly, no
+# extraction library involved.
+_PLAIN_TEXT_CONTENT_TYPES = {"text/plain", "text/markdown"}
+
+
+def _default_extract(raw: bytes, content_type: str, filename: str) -> str:
+    """Extracts plain text from the uploaded file's raw bytes.
+
+    `.txt`/`.md` are decoded directly (fast path, no dependency). `.pdf`
+    goes through `pypdf`, concatenating each page's extracted text.
+
+    Raises `IngestionError` on any failure (corrupt file, unsupported
+    content type, pypdf parse error) so the pipeline can record it as the
+    document's terminal `failed` status/error rather than letting a raw
+    library exception propagate."""
+    if content_type in _PLAIN_TEXT_CONTENT_TYPES:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise IngestionError(f"File is not valid UTF-8: {exc}") from exc
+
+    if content_type == "application/pdf":
+        try:
+            import io
+
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(raw))
+            pages = [page.extract_text() or "" for page in reader.pages]
+            return "\n\n".join(pages)
+        except Exception as exc:
+            raise IngestionError(f"Failed to extract text from '{filename}': {exc}") from exc
+
+    raise IngestionError(f"Unsupported content type for extraction: {content_type}")
+
+
+ExtractFn = Callable[[bytes, str, str], str]
+
+
 # --- Embedding (raw OpenAI-compatible SDK only -- FR-BE-3/NFR-5) ---
 
 
@@ -110,7 +160,13 @@ def _default_embed(chunks: list[str], settings: Settings) -> list[list[float]]:
     endpoint. Gated behind EMBEDDING_BASE_URL/EMBEDDING_API_KEY so this
     never fires (and never requires real credentials) unless the operator
     has configured a Module 2 provider -- keeps unit tests provider-key-free
-    per the mailbox's runtime note."""
+    per the mailbox's runtime note.
+
+    `dimensions` is passed explicitly as EMBEDDING_DIM for the same reason as
+    `services/llm.py::embed_text()`: some providers' embedding models don't
+    default to EMBEDDING_DIM's own default (e.g. Gemini's gemini-embedding-001
+    defaults to 3072, not 1536), which would otherwise trip the dimension
+    check a few lines below this call in `ingest_document()`."""
     if not settings.EMBEDDING_BASE_URL or not settings.EMBEDDING_API_KEY:
         raise IngestionError(
             "Embeddings provider not configured: set EMBEDDING_BASE_URL, "
@@ -118,7 +174,11 @@ def _default_embed(chunks: list[str], settings: Settings) -> list[list[float]]:
         )
 
     client = OpenAI(base_url=settings.EMBEDDING_BASE_URL, api_key=settings.EMBEDDING_API_KEY)
-    response = client.embeddings.create(model=settings.EMBEDDING_MODEL, input=chunks)
+    response = client.embeddings.create(
+        model=settings.EMBEDDING_MODEL,
+        input=chunks,
+        dimensions=settings.EMBEDDING_DIM,
+    )
     # response.data is returned in the same order as the input list.
     return [item.embedding for item in response.data]
 
@@ -169,17 +229,25 @@ def run_ingestion_pipeline(
     service_client: Client,
     document_id: UUID,
     user_id: UUID,
-    text: str,
+    raw: bytes,
+    content_type: str,
+    filename: str,
     settings: Settings,
+    extract_fn: ExtractFn = _default_extract,
     embed_fn: EmbedFn = _default_embed,
 ) -> None:
-    """Runs chunk -> embed -> persist for one document, writing each status
-    transition separately. Intended to be invoked as a FastAPI
+    """Runs extract -> chunk -> embed -> persist for one document, writing
+    each status transition separately. Intended to be invoked as a FastAPI
     `BackgroundTasks` callback from `POST /api/documents` after the
     `document` row is inserted with `status='queued'`.
 
-    `embed_fn` is injectable so callers (tests) can avoid a real embeddings
-    provider round-trip; production code should rely on the default.
+    Text extraction runs here (in the background), not in the upload
+    request handler -- PDF parsing can be slow on larger files, and the
+    upload endpoint must stay a fast 202 Accepted regardless of format.
+
+    `extract_fn`/`embed_fn` are injectable so callers (tests) can avoid a
+    real pypdf parse or a real embeddings provider round-trip; production
+    code should rely on the defaults.
 
     On any failure, writes the terminal `status='failed'` with `error`
     populated -- `failed` is always terminal, never a stuck non-terminal
@@ -193,6 +261,7 @@ def run_ingestion_pipeline(
             document_status="processing",
         )
 
+        text = extract_fn(raw, content_type, filename)
         chunks = chunk_text(text, settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
         if not chunks:
             _update_status(

@@ -28,3 +28,11 @@ openai==1.109.1
 
 # Observability (FR-OBS-1/2; optional at runtime, absence must not break chat)
 langsmith==0.2.10
+
+# PDF text extraction (part of PRD Module 5's multi-format support, pulled
+# forward for PDF only). Lightweight, no ML/layout models -- docling was
+# tried first but has no PyTorch wheel available for Intel Mac + Python
+# 3.13, a hard platform incompatibility, not a version-pinning issue. See
+# services/ingestion.py's _default_extract for the extraction logic and
+# its documented limitations (no OCR, no table-layout preservation).
+pypdf==6.18.0

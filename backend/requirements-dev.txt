@@ -3,3 +3,7 @@
 pytest==8.3.4
 pytest-asyncio==0.25.2
 httpx==0.28.1
+
+# Test-only: generates a real PDF fixture for test_default_extract_reads_real_pdf,
+# so PDF extraction is verified against an actual PDF, not just injected fakes.
+reportlab==5.0.1

@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 
 class FakeResult:
-    def __init__(self, data: list[dict]) -> None:
+    def __init__(self, data: list[dict] | dict | None) -> None:
         self.data = data
 
 
@@ -27,6 +27,8 @@ class _FakeQuery:
         self._order_desc = False
         self._mode = "select"
         self._payload: dict | None = None
+        self._single = False
+        self._limit: int | None = None
 
     def select(self, *_args: Any, **_kwargs: Any) -> "_FakeQuery":
         return self
@@ -48,6 +50,19 @@ class _FakeQuery:
     def order(self, key: str, desc: bool = False) -> "_FakeQuery":
         self._order_key = key
         self._order_desc = desc
+        return self
+
+    def limit(self, count: int) -> "_FakeQuery":
+        self._limit = count
+        return self
+
+    def single(self) -> "_FakeQuery":
+        """Mimics postgrest-py's `.single()`: the response's `.data` becomes
+        a single dict (not a list) -- the first matching row, or `None` if no
+        row matched. Real Postgrest actually errors on 0-or-2+ rows; this
+        fake is intentionally lenient (returns `None` on zero rows) since no
+        current caller relies on that error behavior."""
+        self._single = True
         return self
 
     def execute(self) -> FakeResult:
@@ -72,6 +87,10 @@ class _FakeQuery:
         rows = list(self._filtered)
         if self._order_key:
             rows.sort(key=lambda row: row.get(self._order_key), reverse=self._order_desc)
+        if self._limit is not None:
+            rows = rows[: self._limit]
+        if self._single:
+            return FakeResult(rows[0] if rows else None)
         return FakeResult(rows)
 
 

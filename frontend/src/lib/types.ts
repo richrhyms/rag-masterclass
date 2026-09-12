@@ -9,6 +9,7 @@ export interface Document {
   error: string | null
   created_at: string
   updated_at: string
+  active: boolean
 }
 
 export interface Thread {

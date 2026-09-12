@@ -55,6 +55,19 @@ def _fake_embed(dim: int):
     return _embed
 
 
+def _run_pipeline(*, text: str, **kwargs):
+    """Test helper: these tests predate multi-format support and are about
+    chunk/embed/persist behavior, not extraction -- they pass plain `text`
+    (encoded as .txt) rather than exercising the PDF-specific
+    `_default_extract` path, which is covered separately below."""
+    return run_ingestion_pipeline(
+        raw=text.encode("utf-8"),
+        content_type="text/plain",
+        filename="test.txt",
+        **kwargs,
+    )
+
+
 def test_pipeline_happy_path_writes_chunks_and_completes() -> None:
     client = FakeSupabaseClient()
     document_id = uuid.uuid4()
@@ -66,7 +79,7 @@ def test_pipeline_happy_path_writes_chunks_and_completes() -> None:
         {"id": str(document_id), "user_id": str(user_id), "status": "queued"}
     ).execute()
 
-    run_ingestion_pipeline(
+    _run_pipeline(
         service_client=client,
         document_id=document_id,
         user_id=user_id,
@@ -111,7 +124,7 @@ def test_pipeline_writes_processing_then_completed_as_separate_updates() -> None
 
     ingestion._update_status = _spy
     try:
-        run_ingestion_pipeline(
+        _run_pipeline(
             service_client=client,
             document_id=document_id,
             user_id=user_id,
@@ -134,7 +147,7 @@ def test_pipeline_empty_extractable_text_marks_failed_terminal() -> None:
         {"id": str(document_id), "user_id": str(user_id), "status": "queued"}
     ).execute()
 
-    run_ingestion_pipeline(
+    _run_pipeline(
         service_client=client,
         document_id=document_id,
         user_id=user_id,
@@ -161,7 +174,7 @@ def test_pipeline_embed_fn_exception_marks_failed_terminal_with_error() -> None:
     def _boom(_chunks: list[str], _settings: Settings) -> list[list[float]]:
         raise RuntimeError("embeddings provider unreachable")
 
-    run_ingestion_pipeline(
+    _run_pipeline(
         service_client=client,
         document_id=document_id,
         user_id=user_id,
@@ -187,7 +200,7 @@ def test_pipeline_embed_count_mismatch_marks_failed() -> None:
     def _too_few(chunks: list[str], _settings: Settings) -> list[list[float]]:
         return [[0.1, 0.1, 0.1]]  # fewer vectors than chunks
 
-    run_ingestion_pipeline(
+    _run_pipeline(
         service_client=client,
         document_id=document_id,
         user_id=user_id,
@@ -210,7 +223,7 @@ def test_pipeline_embed_dimension_mismatch_marks_failed() -> None:
         {"id": str(document_id), "user_id": str(user_id), "status": "queued"}
     ).execute()
 
-    run_ingestion_pipeline(
+    _run_pipeline(
         service_client=client,
         document_id=document_id,
         user_id=user_id,
@@ -242,7 +255,7 @@ def test_pipeline_status_writes_scope_by_user_id() -> None:
     # owner -- the .eq("user_id", ...) scoping means the update matches
     # nothing, so the row must remain untouched (still 'queued'), not get
     # silently completed under someone else's identity.
-    run_ingestion_pipeline(
+    _run_pipeline(
         service_client=client,
         document_id=document_id,
         user_id=other_user_id,
@@ -262,3 +275,126 @@ def test_default_embed_raises_ingestion_error_when_unconfigured() -> None:
     settings = _settings(EMBEDDING_BASE_URL=None, EMBEDDING_API_KEY=None)
     with pytest.raises(IngestionError):
         ingestion._default_embed(["chunk one"], settings)
+
+
+# --- _default_extract (PDF support via pypdf, PRD Module 5 pulled forward
+#     for PDF only -- docling was tried first but has no PyTorch wheel for
+#     Intel Mac + Python 3.13, a hard platform incompatibility) ---
+#
+# Unlike docling, pypdf is lightweight (no ML/layout models), so its real
+# PDF path IS exercised directly below with an actual generated PDF, not
+# just via injected fakes. `run_ingestion_pipeline` still takes an
+# injectable `extract_fn` (matching the existing `embed_fn` pattern) so
+# pipeline-level tests don't need a real file on disk -- see the two tests
+# after the real-PDF one for how callers exercise that seam instead.
+
+
+def test_default_extract_decodes_plain_text_directly() -> None:
+    assert ingestion._default_extract(b"hello world", "text/plain", "notes.txt") == "hello world"
+    assert ingestion._default_extract(b"# Title", "text/markdown", "readme.md") == "# Title"
+
+
+def test_default_extract_raises_ingestion_error_on_invalid_utf8() -> None:
+    with pytest.raises(IngestionError):
+        ingestion._default_extract(b"\xff\xfe", "text/plain", "notes.txt")
+
+
+def _make_pdf_bytes(text: str) -> bytes:
+    """Builds a real, valid single-page PDF containing `text`, for testing
+    `_default_extract`'s pypdf path against actual PDF bytes rather than a
+    hand-rolled/injected fake."""
+    import io
+
+    from reportlab.pdfgen import canvas
+
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer)
+    c.drawString(72, 720, text)
+    c.save()
+    return buffer.getvalue()
+
+
+def test_default_extract_reads_real_pdf() -> None:
+    pdf_bytes = _make_pdf_bytes("The secret code is ORCHID-7734.")
+    extracted = ingestion._default_extract(pdf_bytes, "application/pdf", "report.pdf")
+    assert "ORCHID-7734" in extracted
+
+
+def test_default_extract_raises_ingestion_error_on_corrupt_pdf() -> None:
+    with pytest.raises(IngestionError):
+        ingestion._default_extract(b"not a real pdf at all", "application/pdf", "report.pdf")
+
+
+def test_default_extract_raises_ingestion_error_on_unsupported_content_type() -> None:
+    with pytest.raises(IngestionError):
+        ingestion._default_extract(b"fake docx bytes", "application/vnd.openxmlformats", "doc.docx")
+
+
+def test_pipeline_uses_injected_extract_fn_for_non_text_formats() -> None:
+    """Confirms the pipeline actually calls `extract_fn` with the raw bytes/
+    content_type/filename it was given, rather than assuming plain text --
+    this is the seam that lets a caller swap in a fake without a real file
+    on disk for pipeline-level (as opposed to extraction-level) tests."""
+    client = FakeSupabaseClient()
+    document_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    settings = _settings(CHUNK_SIZE=1000, CHUNK_OVERLAP=150, EMBEDDING_DIM=3)
+    client.table("document").insert(
+        {"id": str(document_id), "user_id": str(user_id), "status": "queued"}
+    ).execute()
+
+    captured: dict = {}
+
+    def _fake_extract(raw: bytes, content_type: str, filename: str) -> str:
+        captured.update(raw=raw, content_type=content_type, filename=filename)
+        return "extracted PDF text content"
+
+    run_ingestion_pipeline(
+        service_client=client,
+        document_id=document_id,
+        user_id=user_id,
+        raw=b"%PDF-1.4 fake pdf bytes",
+        content_type="application/pdf",
+        filename="report.pdf",
+        settings=settings,
+        extract_fn=_fake_extract,
+        embed_fn=_fake_embed(3),
+    )
+
+    assert captured == {
+        "raw": b"%PDF-1.4 fake pdf bytes",
+        "content_type": "application/pdf",
+        "filename": "report.pdf",
+    }
+    [doc_row] = client.tables["document"]
+    assert doc_row["status"] == "completed"
+
+
+def test_pipeline_extract_fn_failure_marks_failed_terminal() -> None:
+    client = FakeSupabaseClient()
+    document_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    settings = _settings(EMBEDDING_DIM=3)
+    client.table("document").insert(
+        {"id": str(document_id), "user_id": str(user_id), "status": "queued"}
+    ).execute()
+
+    def _boom_extract(_raw: bytes, _content_type: str, _filename: str) -> str:
+        raise IngestionError("Failed to extract text from 'corrupt.pdf': bad xref table")
+
+    run_ingestion_pipeline(
+        service_client=client,
+        document_id=document_id,
+        user_id=user_id,
+        raw=b"not a real pdf",
+        content_type="application/pdf",
+        filename="corrupt.pdf",
+        settings=settings,
+        extract_fn=_boom_extract,
+        embed_fn=_fake_embed(3),
+    )
+
+    [doc_row] = client.tables["document"]
+    assert doc_row["status"] == "failed"
+    assert "bad xref table" in doc_row["error"]
+    assert client.tables.get("chunk", []) == []
