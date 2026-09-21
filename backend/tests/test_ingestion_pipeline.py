@@ -460,3 +460,236 @@ def test_pipeline_extract_fn_failure_marks_failed_terminal() -> None:
     assert doc_row["status"] == "failed"
     assert "bad xref table" in doc_row["error"]
     assert client.tables.get("chunk", []) == []
+
+
+# --- Metadata extraction (Module 4, PRD) ---
+
+
+def test_pipeline_skips_metadata_extraction_when_no_field_definitions() -> None:
+    """A user with no metadata_field_definition rows configured pays zero
+    extra LLM cost -- extract_metadata_fn must not even be called."""
+    client = FakeSupabaseClient()
+    document_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    settings = _settings(EMBEDDING_DIM=3)
+    client.table("document").insert(
+        {"id": str(document_id), "user_id": str(user_id), "status": "queued"}
+    ).execute()
+
+    calls: list[tuple] = []
+
+    def _spy_extract_metadata(text, field_definitions, settings):
+        calls.append((text, field_definitions))
+        return {}
+
+    _run_pipeline(
+        service_client=client,
+        document_id=document_id,
+        user_id=user_id,
+        text="some document text",
+        settings=settings,
+        embed_fn=_fake_embed(3),
+        extract_metadata_fn=_spy_extract_metadata,
+    )
+
+    assert calls == []
+    [doc_row] = client.tables["document"]
+    assert doc_row["metadata"] == {}
+
+
+def test_pipeline_calls_metadata_extraction_when_field_definitions_exist() -> None:
+    client = FakeSupabaseClient()
+    document_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    settings = _settings(EMBEDDING_DIM=3)
+    client.table("document").insert(
+        {"id": str(document_id), "user_id": str(user_id), "status": "queued"}
+    ).execute()
+    client.table("metadata_field_definition").insert(
+        {"user_id": str(user_id), "name": "category", "description": "The document category."}
+    ).execute()
+
+    calls: list[tuple] = []
+
+    def _spy_extract_metadata(text, field_definitions, settings):
+        calls.append((text, field_definitions))
+        return {"category": "Policy Report"}
+
+    _run_pipeline(
+        service_client=client,
+        document_id=document_id,
+        user_id=user_id,
+        text="a policy document about solar incentives",
+        settings=settings,
+        embed_fn=_fake_embed(3),
+        extract_metadata_fn=_spy_extract_metadata,
+    )
+
+    [(text, field_definitions)] = calls
+    assert text == "a policy document about solar incentives"
+    # the fake's .select() doesn't project columns (unlike real Postgrest),
+    # so extra fields may be present -- only name/description matter to
+    # _default_extract_metadata's contract
+    assert len(field_definitions) == 1
+    assert field_definitions[0]["name"] == "category"
+    assert field_definitions[0]["description"] == "The document category."
+
+    [doc_row] = client.tables["document"]
+    assert doc_row["metadata"] == {"category": "Policy Report"}
+
+
+def test_pipeline_only_fetches_field_definitions_for_the_ingesting_user() -> None:
+    client = FakeSupabaseClient()
+    document_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    other_user_id = uuid.uuid4()
+    settings = _settings(EMBEDDING_DIM=3)
+    client.table("document").insert(
+        {"id": str(document_id), "user_id": str(user_id), "status": "queued"}
+    ).execute()
+    client.table("metadata_field_definition").insert(
+        {"user_id": str(other_user_id), "name": "not mine", "description": "belongs to someone else"}
+    ).execute()
+
+    calls: list[tuple] = []
+
+    def _spy_extract_metadata(text, field_definitions, settings):
+        calls.append(field_definitions)
+        return {}
+
+    _run_pipeline(
+        service_client=client,
+        document_id=document_id,
+        user_id=user_id,
+        text="some text",
+        settings=settings,
+        embed_fn=_fake_embed(3),
+        extract_metadata_fn=_spy_extract_metadata,
+    )
+
+    assert calls == []  # never called -- no field definitions for THIS user
+
+
+class _FakeMetadataMessage:
+    def __init__(self, content: str | None) -> None:
+        self.content = content
+
+
+class _FakeMetadataChoice:
+    def __init__(self, content: str | None) -> None:
+        self.message = _FakeMetadataMessage(content)
+
+
+class _FakeMetadataResponse:
+    def __init__(self, content: str | None) -> None:
+        self.choices = [_FakeMetadataChoice(content)]
+
+
+class _FakeMetadataCompletions:
+    def __init__(self, content: str | None) -> None:
+        self._content = content
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return _FakeMetadataResponse(self._content)
+
+
+class _FakeMetadataClient:
+    def __init__(self, content: str | None) -> None:
+        self.chat = type("_Chat", (), {})()
+        self.chat.completions = _FakeMetadataCompletions(content)
+
+
+_CATEGORY_FIELD = {"name": "category", "description": "The document category."}
+
+
+def test_default_extract_metadata_parses_well_formed_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = _FakeMetadataClient('{"category": "Policy Report"}')
+    monkeypatch.setattr(ingestion, "OpenAI", lambda **_kwargs: fake_client)
+    settings = _settings(LLM_BASE_URL="https://api.example.com", LLM_API_KEY="key", LLM_MODEL="model")
+
+    result = ingestion._default_extract_metadata("some document text", [_CATEGORY_FIELD], settings)
+
+    assert result == {"category": "Policy Report"}
+    call = fake_client.chat.completions.calls[0]
+    assert call["temperature"] == 0
+    assert "some document text" in call["messages"][1]["content"]
+
+
+def test_default_extract_metadata_strips_markdown_code_fence(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = _FakeMetadataClient('```json\n{"category": "Policy Report"}\n```')
+    monkeypatch.setattr(ingestion, "OpenAI", lambda **_kwargs: fake_client)
+    settings = _settings(LLM_BASE_URL="https://api.example.com", LLM_API_KEY="key", LLM_MODEL="model")
+
+    result = ingestion._default_extract_metadata("text", [_CATEGORY_FIELD], settings)
+
+    assert result == {"category": "Policy Report"}
+
+
+def test_default_extract_metadata_maps_missing_field_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = _FakeMetadataClient("{}")  # model didn't mention "category" at all
+    monkeypatch.setattr(ingestion, "OpenAI", lambda **_kwargs: fake_client)
+    settings = _settings(LLM_BASE_URL="https://api.example.com", LLM_API_KEY="key", LLM_MODEL="model")
+
+    result = ingestion._default_extract_metadata("text", [_CATEGORY_FIELD], settings)
+
+    assert result == {"category": None}
+
+
+def test_default_extract_metadata_falls_back_to_empty_on_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = _FakeMetadataClient("not valid json at all")
+    monkeypatch.setattr(ingestion, "OpenAI", lambda **_kwargs: fake_client)
+    settings = _settings(LLM_BASE_URL="https://api.example.com", LLM_API_KEY="key", LLM_MODEL="model")
+
+    result = ingestion._default_extract_metadata("text", [_CATEGORY_FIELD], settings)
+
+    assert result == {"category": None}
+
+
+def test_default_extract_metadata_falls_back_to_empty_on_non_dict_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = _FakeMetadataClient("[1, 2, 3]")
+    monkeypatch.setattr(ingestion, "OpenAI", lambda **_kwargs: fake_client)
+    settings = _settings(LLM_BASE_URL="https://api.example.com", LLM_API_KEY="key", LLM_MODEL="model")
+
+    result = ingestion._default_extract_metadata("text", [_CATEGORY_FIELD], settings)
+
+    assert result == {"category": None}
+
+
+def test_default_extract_metadata_falls_back_to_empty_on_provider_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _ExplodingCompletions:
+        def create(self, **_kwargs):
+            raise RuntimeError("provider network error")
+
+    class _ExplodingClient:
+        def __init__(self) -> None:
+            self.chat = type("_Chat", (), {})()
+            self.chat.completions = _ExplodingCompletions()
+
+    monkeypatch.setattr(ingestion, "OpenAI", lambda **_kwargs: _ExplodingClient())
+    settings = _settings(LLM_BASE_URL="https://api.example.com", LLM_API_KEY="key", LLM_MODEL="model")
+
+    result = ingestion._default_extract_metadata("text", [_CATEGORY_FIELD], settings)
+
+    assert result == {"category": None}
+
+
+def test_default_extract_metadata_skips_llm_call_when_unconfigured() -> None:
+    settings = _settings(LLM_BASE_URL=None, LLM_API_KEY=None, LLM_MODEL=None)
+
+    result = ingestion._default_extract_metadata("text", [_CATEGORY_FIELD], settings)
+
+    assert result == {"category": None}
+
+
+def test_default_extract_metadata_returns_empty_immediately_for_no_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(**_kwargs):
+        raise AssertionError("OpenAI client should never be constructed with no field definitions")
+
+    monkeypatch.setattr(ingestion, "OpenAI", _boom)
+    settings = _settings(LLM_BASE_URL="https://api.example.com", LLM_API_KEY="key", LLM_MODEL="model")
+
+    result = ingestion._default_extract_metadata("text", [], settings)
+
+    assert result == {}

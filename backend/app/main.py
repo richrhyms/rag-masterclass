@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.config import get_settings
-from app.routers import documents, health, settings, threads
+from app.routers import documents, health, metadata_fields, settings, threads
 
 logger = logging.getLogger("rag_masterclass")
 
@@ -99,6 +99,8 @@ def create_app() -> FastAPI:
     app.include_router(documents.router)
     # Chat guardrail settings (restrict-to-documents toggle + threshold):
     app.include_router(settings.router)
+    # Module 4: configurable metadata field definitions:
+    app.include_router(metadata_fields.router)
 
     return app
 

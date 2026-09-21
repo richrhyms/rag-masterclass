@@ -29,6 +29,7 @@ Client usage:
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Callable
@@ -234,6 +235,100 @@ def _default_embed(chunks: list[str], settings: Settings) -> list[list[float]]:
 EmbedFn = Callable[[list[str], Settings], list[list[float]]]
 
 
+# --- Metadata extraction (Module 4, PRD) ---
+#
+# Configurable per-user field definitions (`metadata_field_definition`,
+# app/routers/metadata_fields.py) -- NOT hardcoded per-client field names,
+# so the same codebase stays usable across different client deployments.
+# Only ever invoked when the ingesting user has configured at least one
+# field: a user with none configured pays zero extra LLM cost, identical
+# to ingestion behavior before this module existed.
+
+# Metadata fields (category, date, author, etc.) are almost always
+# determinable from a document's opening content -- bounding the prompt to
+# a prefix keeps extraction latency/cost predictable regardless of how
+# large the source document is, rather than scaling with it.
+_METADATA_EXTRACTION_TEXT_LIMIT = 6000
+
+
+def _default_extract_metadata(
+    text: str, field_definitions: list[dict], settings: Settings
+) -> dict[str, str | None]:
+    """One LLM call that extracts the configured metadata fields from a
+    document's extracted text. Uses the CHAT provider (LLM_BASE_URL/
+    LLM_API_KEY/LLM_MODEL), not the embeddings provider -- this is a
+    structured-extraction completion, not an embedding.
+
+    Returns a field-name -> value dict; a field the LLM couldn't determine
+    is mapped to None rather than omitted, so callers can distinguish
+    "checked, not found" from "never asked".
+
+    Deliberately never raises: metadata is an enhancement, not a
+    correctness gate (unlike the chat guardrail's scope classifier, which
+    must fail loudly -- see services/chat.py's module docstring for that
+    contrast). Any failure here -- provider misconfigured, network error,
+    unparseable response -- logs and degrades to an all-None dict rather
+    than failing the whole ingestion pipeline over a secondary feature."""
+    empty_result: dict[str, str | None] = {field["name"]: None for field in field_definitions}
+    if not field_definitions:
+        return empty_result
+
+    if not settings.LLM_BASE_URL or not settings.LLM_API_KEY or not settings.LLM_MODEL:
+        logger.warning(
+            "Metadata field definitions configured but LLM_BASE_URL/LLM_API_KEY/"
+            "LLM_MODEL are not set; skipping metadata extraction"
+        )
+        return empty_result
+
+    field_list = "\n".join(f'- "{field["name"]}": {field["description"]}' for field in field_definitions)
+    try:
+        client = OpenAI(base_url=settings.LLM_BASE_URL, api_key=settings.LLM_API_KEY)
+        response = client.chat.completions.create(
+            model=settings.LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract the following metadata fields from the document text "
+                        "below. Reply with ONLY a JSON object mapping each field name to "
+                        "its extracted value (a short string), or null if the document "
+                        "doesn't contain that information. No other text, no markdown "
+                        f"code fences.\n\nFields:\n{field_list}"
+                    ),
+                },
+                {"role": "user", "content": text[:_METADATA_EXTRACTION_TEXT_LIMIT]},
+            ],
+            max_tokens=1000,
+            reasoning_effort="low",
+            temperature=0,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return empty_result
+        return {field["name"]: parsed.get(field["name"]) for field in field_definitions}
+    except Exception:
+        logger.exception("Metadata extraction failed; proceeding with empty metadata")
+        return empty_result
+
+
+ExtractMetadataFn = Callable[[str, list[dict], Settings], dict]
+
+
+def _fetch_metadata_field_definitions(service_client: Client, user_id: UUID) -> list[dict]:
+    response = (
+        service_client.table("metadata_field_definition")
+        .select("name,description")
+        .eq("user_id", str(user_id))
+        .execute()
+    )
+    return response.data or []
+
+
 # --- Status transitions (Realtime status contract) ---
 
 
@@ -245,18 +340,27 @@ def _update_status(
     document_status: str,
     chunk_count: int | None = None,
     error: str | None = None,
+    metadata: dict | None = None,
 ) -> None:
     """Writes a single status transition as its own UPDATE (design.md:
     "Backend-2 MUST write each transition ... as separate UPDATEs so each
     transition is observable live" via Supabase Realtime on `public.document`).
     Always scopes the WHERE clause with both `id` and `user_id` explicitly,
-    even though the service-role client bypasses RLS."""
+    even though the service-role client bypasses RLS.
+
+    `metadata` (Module 4) is bundled into the same UPDATE as the terminal
+    `completed` status rather than written separately -- becoming available
+    at the same moment a document finishes processing is a single
+    meaningful change from the client's perspective, not a distinct status
+    transition that needs its own observable UPDATE."""
     payload: dict[str, object] = {
         "status": document_status,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     if chunk_count is not None:
         payload["chunk_count"] = chunk_count
+    if metadata is not None:
+        payload["metadata"] = metadata
     if document_status == "failed":
         payload["error"] = error or "Unknown ingestion error"
 
@@ -283,6 +387,7 @@ def run_ingestion_pipeline(
     settings: Settings,
     extract_fn: ExtractFn = _default_extract,
     embed_fn: EmbedFn = _default_embed,
+    extract_metadata_fn: ExtractMetadataFn = _default_extract_metadata,
 ) -> None:
     """Runs extract -> chunk -> embed -> persist for one document, writing
     each status transition separately. Intended to be invoked as a FastAPI
@@ -293,9 +398,10 @@ def run_ingestion_pipeline(
     request handler -- PDF parsing can be slow on larger files, and the
     upload endpoint must stay a fast 202 Accepted regardless of format.
 
-    `extract_fn`/`embed_fn` are injectable so callers (tests) can avoid a
-    real pypdf parse or a real embeddings provider round-trip; production
-    code should rely on the defaults.
+    `extract_fn`/`embed_fn`/`extract_metadata_fn` are injectable so callers
+    (tests) can avoid a real pypdf parse, a real embeddings provider
+    round-trip, or a real LLM metadata-extraction call; production code
+    should rely on the defaults.
 
     On any failure, writes the terminal `status='failed'` with `error`
     populated -- `failed` is always terminal, never a stuck non-terminal
@@ -346,12 +452,19 @@ def run_ingestion_pipeline(
         ]
         service_client.table("chunk").insert(rows).execute()
 
+        # Module 4: only attempt extraction if the user has actually
+        # configured fields -- a user with none configured pays zero extra
+        # LLM cost, identical to ingestion before this module existed.
+        field_definitions = _fetch_metadata_field_definitions(service_client, user_id)
+        metadata = extract_metadata_fn(text, field_definitions, settings) if field_definitions else {}
+
         _update_status(
             service_client,
             document_id=document_id,
             user_id=user_id,
             document_status="completed",
             chunk_count=len(chunks),
+            metadata=metadata,
         )
     except Exception as exc:
         logger.exception("Ingestion pipeline failed for document %s", document_id)
