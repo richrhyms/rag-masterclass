@@ -614,6 +614,10 @@ async def test_classify_request_in_scope_parses_verdict(
     assert result is expected
     call = fake_client.chat.completions.calls[0]
     assert call["reasoning_effort"] == "low"
+    # temperature=0 is load-bearing: without it this binary scope gate was
+    # empirically observed to return different verdicts for the identical
+    # message + passages across repeated calls (see docstring).
+    assert call["temperature"] == 0
     assert "passage content" in call["messages"][1]["content"]
     assert "a question" in call["messages"][1]["content"]
 

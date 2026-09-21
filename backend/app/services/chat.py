@@ -178,6 +178,15 @@ async def _classify_request_in_scope(
     "thinking" model that burns its token budget on hidden reasoning and
     returns empty content at low budgets.
 
+    `temperature=0` is load-bearing, not tuning: this is a binary scope
+    gate, not creative generation, and without pinning it to 0 the
+    provider's default (non-zero) temperature was empirically observed to
+    return a DIFFERENT verdict for the identical message + identical
+    retrieved passages across repeated calls in the same session -- the
+    same off-topic message that was correctly blocked once was answered
+    normally on a later, otherwise-identical retry. A gate whose verdict
+    isn't reproducible for the same input isn't actually a gate.
+
     An unparseable-but-successful response defaults to OFF_TOPIC (fail
     closed, consistent with `_load_chat_settings`) -- this is a normal
     control-flow outcome, not an error. An actual exception (provider
@@ -199,6 +208,7 @@ async def _classify_request_in_scope(
         ],
         max_tokens=500,
         reasoning_effort="low",
+        temperature=0,
     )
     verdict = (response.choices[0].message.content or "").strip().upper()
     return verdict.startswith("ON_TOPIC")
