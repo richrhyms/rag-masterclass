@@ -152,6 +152,14 @@ async def upload_document(
     # Storage object, then ingest the new content fresh under a new id,
     # rather than leaving two versions of "the same document" active in
     # retrieval simultaneously.
+    #
+    # The stale document(s) are only LOOKED UP here, not deleted yet: the
+    # delete happens at the very end, after the new upload + document row
+    # are fully committed. Deleting first (as an earlier version of this
+    # code did) meant a subsequent Storage/DB failure permanently lost the
+    # old document with nothing to replace it -- unrecoverable data loss.
+    # With the delete last, a failure anywhere in the new-upload path
+    # leaves the old document completely untouched.
     stale_resp = (
         db.table("document")
         .select("id,storage_path")
@@ -160,9 +168,7 @@ async def upload_document(
         .neq("status", "failed")
         .execute()
     )
-    for stale in stale_resp.data or []:
-        db.table("document").delete().eq("id", stale["id"]).eq("user_id", str(user.id)).execute()
-        storage.delete_document_object(service_client, stale["storage_path"])
+    stale_documents = stale_resp.data or []
 
     document_id = uuid4()
     byte_size = len(raw)
@@ -203,6 +209,20 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to create the document record.", "code": "server_error"},
         ) from exc
+
+    # New document is now fully committed -- safe to remove the superseded
+    # version(s). Best-effort: if this fails, the new document still
+    # succeeds and is returned to the caller; a stray old row/Storage
+    # object left behind is a harmless, recoverable inconsistency, unlike
+    # losing the old document before the new one existed.
+    for stale in stale_documents:
+        try:
+            db.table("document").delete().eq("id", stale["id"]).eq("user_id", str(user.id)).execute()
+            storage.delete_document_object(service_client, stale["storage_path"])
+        except Exception:
+            logger.exception(
+                "Failed to remove superseded document %s while uploading %s", stale["id"], document_id
+            )
 
     background_tasks.add_task(
         ingestion.run_ingestion_pipeline,

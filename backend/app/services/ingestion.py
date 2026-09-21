@@ -455,7 +455,23 @@ def run_ingestion_pipeline(
         # Module 4: only attempt extraction if the user has actually
         # configured fields -- a user with none configured pays zero extra
         # LLM cost, identical to ingestion before this module existed.
-        field_definitions = _fetch_metadata_field_definitions(service_client, user_id)
+        #
+        # This fetch is deliberately isolated in its own try/except, NOT
+        # left to the pipeline's outer exception handler: chunks/embeddings
+        # were already successfully persisted one line above, so a
+        # transient failure here (network blip, connection pool exhaustion)
+        # must not mark the whole document 'failed' and discard that
+        # already-paid-for work over a secondary feature -- the same "never
+        # raises" contract `_default_extract_metadata` itself already
+        # follows.
+        try:
+            field_definitions = _fetch_metadata_field_definitions(service_client, user_id)
+        except Exception:
+            logger.exception(
+                "Failed to fetch metadata field definitions for document %s; proceeding without metadata",
+                document_id,
+            )
+            field_definitions = []
         metadata = extract_metadata_fn(text, field_definitions, settings) if field_definitions else {}
 
         _update_status(

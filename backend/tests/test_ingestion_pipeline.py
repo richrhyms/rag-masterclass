@@ -570,6 +570,42 @@ def test_pipeline_only_fetches_field_definitions_for_the_ingesting_user() -> Non
     assert calls == []  # never called -- no field definitions for THIS user
 
 
+def test_pipeline_completes_despite_metadata_field_fetch_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test: an earlier version let a failure while fetching
+    metadata field definitions propagate to the pipeline's outer handler,
+    marking the WHOLE document 'failed' even though chunks/embeddings had
+    already been successfully persisted one line above. That fetch must be
+    isolated so a transient failure degrades to 'no metadata' instead of
+    discarding already-completed, already-paid-for work."""
+    client = FakeSupabaseClient()
+    document_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    settings = _settings(EMBEDDING_DIM=3)
+    client.table("document").insert(
+        {"id": str(document_id), "user_id": str(user_id), "status": "queued"}
+    ).execute()
+
+    def _boom_fetch(_service_client, _user_id):
+        raise RuntimeError("transient db failure")
+
+    monkeypatch.setattr(ingestion, "_fetch_metadata_field_definitions", _boom_fetch)
+
+    _run_pipeline(
+        service_client=client,
+        document_id=document_id,
+        user_id=user_id,
+        text="some document text",
+        settings=settings,
+        embed_fn=_fake_embed(3),
+    )
+
+    [doc_row] = client.tables["document"]
+    assert doc_row["status"] == "completed"
+    assert doc_row["metadata"] == {}
+    # the chunks that were already successfully persisted must not be discarded
+    assert len(client.tables["chunk"]) > 0
+
+
 class _FakeMetadataMessage:
     def __init__(self, content: str | None) -> None:
         self.content = content
