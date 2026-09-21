@@ -57,6 +57,11 @@ class _FakeTableQuery:
         self._filtered = [row for row in self._filtered if str(row.get(key)) != str(value)]
         return self
 
+    def in_(self, key: str, values: list[Any]) -> "_FakeTableQuery":
+        str_values = {str(value) for value in values}
+        self._filtered = [row for row in self._filtered if str(row.get(key)) in str_values]
+        return self
+
     def order(self, key: str, desc: bool = False) -> "_FakeTableQuery":
         self._order_key = key
         self._order_desc = desc

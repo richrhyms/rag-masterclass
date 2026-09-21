@@ -219,6 +219,31 @@ def test_chat_400_when_message_empty(client: TestClient, fake_db: FakeSupabaseCl
     assert fake_db.tables.get("message", []) == []
 
 
+def test_chat_422_when_message_field_missing_uses_flat_error_shape(
+    client: TestClient, fake_db: FakeSupabaseClient
+) -> None:
+    """FastAPI's default 422 (RequestValidationError) response shape is
+    `{"detail": [{"loc": [...], "msg": ..., "type": ...}]}` -- a third,
+    structurally different shape from this app's flat `{"error", "code"}`
+    convention. The global handler in app/main.py reshapes it to match."""
+    thread_id = uuid.uuid4()
+    fake_db.tables["thread"] = [
+        {
+            "id": str(thread_id),
+            "user_id": str(USER_ID),
+            "title": None,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    resp = client.post(f"/api/threads/{thread_id}/chat", json={})  # missing required "message" field
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "invalid_request"
+    assert "message" in body["error"]  # names the missing field
+
+
 def test_chat_persists_user_message_and_streams_sse(
     client: TestClient, fake_db: FakeSupabaseClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

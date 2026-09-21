@@ -7,8 +7,13 @@ interface MetadataFilterBarProps {
   fieldDefinitions: MetadataFieldDefinition[]
   // Applies `active` to the subset of documents matching field=value, and
   // the opposite to everyone else -- delegates to the caller (IngestionPage)
-  // since it already owns per-document PATCH + optimistic-update logic.
+  // since it already owns bulk-PATCH + optimistic-update logic.
   onApplyFilter: (matchingIds: string[], nonMatchingIds: string[]) => Promise<void>
+  // Restores document active-state to what it was before the current
+  // filter session started (see IngestionPage's preFilterSnapshot) --
+  // NOT "force every document active", which would silently discard any
+  // manual selections made before the filter bar was ever touched.
+  onClear: () => Promise<void>
 }
 
 // Module 4 (PRD): "filter retrieval by metadata". Rather than a new
@@ -21,6 +26,7 @@ export const MetadataFilterBar: React.FC<MetadataFilterBarProps> = ({
   documents,
   fieldDefinitions,
   onApplyFilter,
+  onClear,
 }) => {
   const [fieldName, setFieldName] = useState('')
   const [value, setValue] = useState('')
@@ -56,10 +62,7 @@ export const MetadataFilterBar: React.FC<MetadataFilterBarProps> = ({
     if (applying) return
     setApplying(true)
     try {
-      await onApplyFilter(
-        documents.map((d) => d.id),
-        []
-      )
+      await onClear()
     } finally {
       setApplying(false)
       setFieldName('')
@@ -111,7 +114,7 @@ export const MetadataFilterBar: React.FC<MetadataFilterBarProps> = ({
       <button
         onClick={handleClear}
         disabled={applying}
-        title="Reset: make all documents active again"
+        title="Clear filter: restore document selection to how it was before this filter"
         className="flex items-center gap-1 px-2 py-1 text-zinc-500 hover:text-zinc-700 text-sm disabled:opacity-50"
       >
         <X className="w-3.5 h-3.5" />

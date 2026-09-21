@@ -50,7 +50,7 @@ def test_create_and_list_metadata_field_definitions(client: TestClient) -> None:
 def test_create_rejects_blank_name_or_description(client: TestClient) -> None:
     resp = client.post("/api/metadata-fields", json={"name": "  ", "description": "something"})
     assert resp.status_code == 400
-    assert resp.json()["detail"]["code"] == "invalid_request"
+    assert resp.json()["code"] == "invalid_request"
 
     resp2 = client.post("/api/metadata-fields", json={"name": "category", "description": "  "})
     assert resp2.status_code == 400
@@ -94,7 +94,7 @@ def test_delete_field_definition(client: TestClient, fake_db: FakeSupabaseClient
 def test_delete_not_found_returns_404(client: TestClient) -> None:
     resp = client.delete(f"/api/metadata-fields/{uuid.uuid4()}")
     assert resp.status_code == 404
-    assert resp.json()["detail"]["code"] == "not_found"
+    assert resp.json()["code"] == "not_found"
 
 
 def test_delete_owned_by_another_user_returns_404(client: TestClient, fake_db: FakeSupabaseClient) -> None:

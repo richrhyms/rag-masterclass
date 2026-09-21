@@ -93,7 +93,7 @@ def test_upload_rejects_unsupported_extension(client: TestClient) -> None:
         files={"file": ("image.png", b"\x89PNG fake", "image/png")},
     )
     assert resp.status_code == 415
-    assert resp.json()["detail"]["code"] == "unsupported_file_type"
+    assert resp.json()["code"] == "unsupported_file_type"
 
 
 def test_upload_pdf_is_accepted_without_eager_utf8_validation(client: TestClient) -> None:
@@ -148,7 +148,7 @@ def test_upload_rejects_unsupported_extension_still_rejects_other_binaries(clien
         files={"file": ("archive.zip", b"PK\x03\x04 fake zip", "application/zip")},
     )
     assert resp.status_code == 415
-    assert resp.json()["detail"]["code"] == "unsupported_file_type"
+    assert resp.json()["code"] == "unsupported_file_type"
 
 
 def test_upload_rejects_oversized_file(fake_client: FakeSupabaseClient, monkeypatch) -> None:
@@ -167,7 +167,7 @@ def test_upload_rejects_oversized_file(fake_client: FakeSupabaseClient, monkeypa
             files={"file": ("big.txt", b"x" * 100, "text/plain")},
         )
         assert resp.status_code == 413
-        assert resp.json()["detail"]["code"] == "file_too_large"
+        assert resp.json()["code"] == "file_too_large"
         assert fake_client.tables.get("document", []) == []
     finally:
         app.dependency_overrides.clear()
@@ -176,7 +176,7 @@ def test_upload_rejects_oversized_file(fake_client: FakeSupabaseClient, monkeypa
 def test_upload_rejects_empty_file(client: TestClient) -> None:
     resp = client.post("/api/documents", files={"file": ("empty.txt", b"", "text/plain")})
     assert resp.status_code == 400
-    assert resp.json()["detail"]["code"] == "invalid_request"
+    assert resp.json()["code"] == "invalid_request"
 
 
 def test_upload_rejects_non_utf8_content(client: TestClient) -> None:
@@ -185,7 +185,7 @@ def test_upload_rejects_non_utf8_content(client: TestClient) -> None:
         files={"file": ("bad.txt", b"\xff\xfe\x00bad", "text/plain")},
     )
     assert resp.status_code == 400
-    assert resp.json()["detail"]["code"] == "invalid_request"
+    assert resp.json()["code"] == "invalid_request"
 
 
 # --- Module 3: content-hash dedup + incremental re-ingest ---
@@ -199,8 +199,8 @@ def test_upload_rejects_exact_duplicate_content(client: TestClient, fake_client:
     second = client.post("/api/documents", files={"file": ("different-name.txt", content, "text/plain")})
 
     assert second.status_code == 409
-    assert second.json()["detail"]["code"] == "duplicate_content"
-    assert "notes.txt" in second.json()["detail"]["error"]
+    assert second.json()["code"] == "duplicate_content"
+    assert "notes.txt" in second.json()["error"]
     # no second document row or pipeline kickoff -- rejected before any processing
     assert len(fake_client.tables["document"]) == 1
     assert len(client.pipeline_calls) == 1  # type: ignore[attr-defined]
@@ -280,6 +280,47 @@ def test_upload_does_not_supersede_a_failed_same_filename_document(
     remaining = fake_client.tables["document"]
     assert len(remaining) == 2
     assert any(row["id"] == str(old_document_id) for row in remaining)
+
+
+@pytest.mark.parametrize("in_flight_status", ["queued", "processing"])
+def test_upload_does_not_supersede_an_in_flight_same_filename_document(
+    client: TestClient, fake_client: FakeSupabaseClient, in_flight_status: str
+) -> None:
+    """Regression test for a race found in code review: an earlier version
+    treated any non-failed document (including one still queued/processing
+    from a concurrent in-flight upload) as supersedable. Deleting a
+    document whose background ingestion hasn't finished yet caused its
+    later chunk inserts to fail a foreign-key check, silently destroying
+    that upload's content. Only a `completed` document may be superseded --
+    an in-flight one is left alone, and the new upload becomes a separate
+    document instead."""
+    in_flight_document_id = uuid.uuid4()
+    in_flight_storage_path = f"documents/{USER_ID}/{in_flight_document_id}/report.txt"
+    fake_client.storage.buckets["documents"] = {f"{USER_ID}/{in_flight_document_id}/report.txt": b"in flight"}
+    fake_client.table("document").insert(
+        {
+            "id": str(in_flight_document_id),
+            "user_id": str(USER_ID),
+            "filename": "report.txt",
+            "storage_path": in_flight_storage_path,
+            "content_type": "text/plain",
+            "byte_size": 9,
+            "status": in_flight_status,
+            "content_hash": "in-flight-hash",
+        }
+    ).execute()
+
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("report.txt", b"a second, concurrent upload", "text/plain")},
+    )
+
+    assert resp.status_code == 202
+    # the in-flight document is left completely untouched -- both rows exist
+    remaining = fake_client.tables["document"]
+    assert len(remaining) == 2
+    assert any(row["id"] == str(in_flight_document_id) for row in remaining)
+    assert f"{USER_ID}/{in_flight_document_id}/report.txt" in fake_client.storage.buckets["documents"]
 
 
 def test_upload_supersede_leaves_old_document_intact_if_new_upload_fails(
@@ -463,7 +504,7 @@ def test_delete_document_removes_row_and_storage_object(
 def test_delete_document_not_found_returns_404(client: TestClient) -> None:
     resp = client.delete(f"/api/documents/{uuid.uuid4()}")
     assert resp.status_code == 404
-    assert resp.json()["detail"]["code"] == "not_found"
+    assert resp.json()["code"] == "not_found"
 
 
 def test_delete_document_owned_by_another_user_returns_404(
@@ -512,7 +553,7 @@ def test_patch_document_active_toggles_selection(client: TestClient, fake_client
 def test_patch_document_active_not_found_returns_404(client: TestClient) -> None:
     resp = client.patch(f"/api/documents/{uuid.uuid4()}", json={"active": False})
     assert resp.status_code == 404
-    assert resp.json()["detail"]["code"] == "not_found"
+    assert resp.json()["code"] == "not_found"
 
 
 def test_patch_document_active_owned_by_another_user_returns_404(
@@ -578,3 +619,62 @@ def test_patch_all_documents_active_empty_for_new_user(client: TestClient) -> No
     resp = client.patch("/api/documents", json={"active": False})
     assert resp.status_code == 200
     assert resp.json() == {"documents": []}
+
+
+def test_patch_documents_active_scoped_to_document_ids(client: TestClient, fake_client: FakeSupabaseClient) -> None:
+    """The metadata filter bar applies a filter with one bulk call per
+    active value (matching -> true, non-matching -> false) instead of one
+    PATCH per document -- this exercises the `document_ids` scoping that
+    makes that possible."""
+    ids = {}
+    for filename in ["a.txt", "b.txt", "c.txt"]:
+        document_id = uuid.uuid4()
+        ids[filename] = document_id
+        fake_client.table("document").insert(
+            {
+                "id": str(document_id),
+                "user_id": str(USER_ID),
+                "filename": filename,
+                "status": "completed",
+                "byte_size": 10,
+                "active": True,
+            }
+        ).execute()
+
+    resp = client.patch(
+        "/api/documents",
+        json={"active": False, "document_ids": [str(ids["a.txt"]), str(ids["b.txt"])]},
+    )
+
+    assert resp.status_code == 200
+    rows_by_id = {row["id"]: row for row in fake_client.tables["document"]}
+    assert rows_by_id[str(ids["a.txt"])]["active"] is False
+    assert rows_by_id[str(ids["b.txt"])]["active"] is False
+    # not included in document_ids -- left untouched
+    assert rows_by_id[str(ids["c.txt"])]["active"] is True
+
+
+def test_patch_documents_active_with_document_ids_still_scoped_to_caller(
+    client: TestClient, fake_client: FakeSupabaseClient
+) -> None:
+    """A caller cannot use `document_ids` to reach another user's document
+    -- the explicit `.eq("user_id", ...)` still applies regardless of what
+    ids are requested."""
+    other_document_id = uuid.uuid4()
+    fake_client.table("document").insert(
+        {
+            "id": str(other_document_id),
+            "user_id": str(OTHER_USER_ID),
+            "filename": "other.txt",
+            "status": "completed",
+            "byte_size": 10,
+            "active": True,
+        }
+    ).execute()
+
+    resp = client.patch("/api/documents", json={"active": False, "document_ids": [str(other_document_id)]})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"documents": []}
+    other_row = next(row for row in fake_client.tables["document"] if row["id"] == str(other_document_id))
+    assert other_row["active"] is True
