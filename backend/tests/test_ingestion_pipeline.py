@@ -330,6 +330,68 @@ def test_default_extract_raises_ingestion_error_on_unsupported_content_type() ->
         ingestion._default_extract(b"fake docx bytes", "application/vnd.openxmlformats", "doc.docx")
 
 
+_DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _make_docx_bytes(*paragraphs: str) -> bytes:
+    """Builds a real, valid .docx containing `paragraphs`, for testing
+    `_default_extract`'s python-docx path against actual DOCX bytes rather
+    than a hand-rolled/injected fake."""
+    import io
+
+    from docx import Document as DocxDocument
+
+    document = DocxDocument()
+    for paragraph in paragraphs:
+        document.add_paragraph(paragraph)
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def test_default_extract_reads_real_docx() -> None:
+    docx_bytes = _make_docx_bytes("The secret code is ORCHID-7734.", "Second paragraph.")
+    extracted = ingestion._default_extract(docx_bytes, _DOCX_CONTENT_TYPE, "report.docx")
+    assert "ORCHID-7734" in extracted
+    assert "Second paragraph." in extracted
+
+
+def test_default_extract_skips_empty_docx_paragraphs() -> None:
+    docx_bytes = _make_docx_bytes("First.", "", "   ", "Second.")
+    extracted = ingestion._default_extract(docx_bytes, _DOCX_CONTENT_TYPE, "report.docx")
+    assert extracted == "First.\n\nSecond."
+
+
+def test_default_extract_raises_ingestion_error_on_corrupt_docx() -> None:
+    with pytest.raises(IngestionError):
+        ingestion._default_extract(b"not a real docx at all", _DOCX_CONTENT_TYPE, "report.docx")
+
+
+def test_default_extract_reads_real_html() -> None:
+    html = b"""
+    <html>
+      <head><title>ignored title text</title><style>body { color: red; }</style></head>
+      <body>
+        <script>console.log('should not appear');</script>
+        <h1>The secret code is ORCHID-7734.</h1>
+        <p>Second paragraph.</p>
+      </body>
+    </html>
+    """
+    extracted = ingestion._default_extract(html, "text/html", "page.html")
+    assert "ORCHID-7734" in extracted
+    assert "Second paragraph." in extracted
+    assert "console.log" not in extracted
+    assert "color: red" not in extracted
+
+
+def test_default_extract_html_falls_back_to_latin1_on_non_utf8() -> None:
+    # a byte sequence that is invalid UTF-8 but valid latin-1
+    html = b"<html><body><p>caf\xe9</p></body></html>"
+    extracted = ingestion._default_extract(html, "text/html", "page.html")
+    assert "café" in extracted
+
+
 def test_pipeline_uses_injected_extract_fn_for_non_text_formats() -> None:
     """Confirms the pipeline actually calls `extract_fn` with the raw bytes/
     content_type/filename it was given, rather than assuming plain text --

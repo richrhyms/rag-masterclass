@@ -30,15 +30,18 @@ logger = logging.getLogger("rag_masterclass.documents")
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
-# Accepted input formats. PDF added on top of the original .txt/.md (part of
-# PRD Module 5's multi-format support, pulled forward for PDF only -- see
-# services/ingestion.py's `_default_extract` docstring for why DOCX/HTML
-# are NOT included: docling would have covered all three, but has no
-# PyTorch wheel for Intel Mac + Python 3.13; pypdf covers PDF only).
+# Accepted input formats (PRD Module 5: multi-format support). `docling`
+# would have covered all of these uniformly via one layout-aware library,
+# but has no PyTorch wheel for Intel Mac + Python 3.13 -- see
+# services/ingestion.py's extraction functions for the per-format
+# lightweight libraries used instead (pypdf, python-docx, BeautifulSoup).
 _EXTENSION_CONTENT_TYPES: dict[str, str] = {
     "txt": "text/plain",
     "md": "text/markdown",
     "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "html": "text/html",
+    "htm": "text/html",
 }
 
 # Only these are eagerly UTF-8-validated at upload time (fast 400 on bad
@@ -101,10 +104,12 @@ async def upload_document(
             detail={"error": "Uploaded file is empty.", "code": "invalid_request"},
         )
 
-    # Fast, synchronous validation for plain-text formats only -- PDF is
-    # binary and can't be UTF-8-validated here; its content is opaque until
-    # pypdf parses it in the background pipeline, so a bad/corrupt PDF
-    # surfaces as a 'failed' status instead of a 400 at upload time.
+    # Fast, synchronous validation for plain-text formats only -- PDF/DOCX
+    # are binary and HTML may declare a non-UTF-8 encoding, so none of them
+    # can be validated here; their content is opaque until the
+    # format-specific extractor runs in the background pipeline, so a
+    # bad/corrupt file surfaces as a 'failed' status instead of a 400 at
+    # upload time.
     if content_type in _PLAIN_TEXT_CONTENT_TYPES:
         try:
             raw.decode("utf-8")

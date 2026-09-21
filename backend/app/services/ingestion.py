@@ -102,30 +102,81 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
     return chunks
 
 
-# --- Text extraction (partial PRD Module 5 pulled forward: PDF only) ---
+# --- Text extraction (PRD Module 5: multi-format support) ---
 #
-# `docling` (layout-aware, covers PDF/DOCX/HTML) was tried first but could
-# not be installed: it depends on PyTorch, which has no published wheel for
-# Intel Mac + Python 3.13 -- a hard platform incompatibility, not something
-# fixable by pinning versions differently. Fell back to `pypdf`: PDF only,
-# no ML/layout models, no OCR (scanned/image-only PDFs yield no text), no
-# table-layout preservation -- adequate for grounding typical text-based
-# PDFs, which is this app's actual need. DOCX/HTML are NOT supported by this
-# fallback and are rejected at upload time (see documents.py).
+# `docling` (layout-aware, would have covered PDF/DOCX/HTML uniformly) was
+# tried first but could not be installed: it depends on PyTorch, which has
+# no published wheel for Intel Mac + Python 3.13 -- a hard platform
+# incompatibility, not something fixable by pinning versions differently.
+# Fell back to per-format lightweight libraries instead, none of which pull
+# in PyTorch/ML dependencies:
+#   .txt/.md  -- direct UTF-8 decode, no library
+#   .pdf      -- pypdf (no OCR, no table-layout preservation)
+#   .docx     -- python-docx (paragraph text only; no headers/footers,
+#                footnotes, or embedded-object content)
+#   .html/.htm -- BeautifulSoup, stripping <script>/<style> before
+#                extracting visible text (no layout/table structure
+#                preservation, same tradeoff as the other formats here)
 
 # Content types that are already plain text -- decoded directly, no
 # extraction library involved.
 _PLAIN_TEXT_CONTENT_TYPES = {"text/plain", "text/markdown"}
 
 
-def _default_extract(raw: bytes, content_type: str, filename: str) -> str:
-    """Extracts plain text from the uploaded file's raw bytes.
+def _extract_pdf(raw: bytes, filename: str) -> str:
+    try:
+        import io
 
-    `.txt`/`.md` are decoded directly (fast path, no dependency). `.pdf`
-    goes through `pypdf`, concatenating each page's extracted text.
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(raw))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n\n".join(pages)
+    except Exception as exc:
+        raise IngestionError(f"Failed to extract text from '{filename}': {exc}") from exc
+
+
+def _extract_docx(raw: bytes, filename: str) -> str:
+    try:
+        import io
+
+        from docx import Document as DocxDocument
+
+        document = DocxDocument(io.BytesIO(raw))
+        paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
+        return "\n\n".join(paragraphs)
+    except Exception as exc:
+        raise IngestionError(f"Failed to extract text from '{filename}': {exc}") from exc
+
+
+def _extract_html(raw: bytes, filename: str) -> str:
+    try:
+        from bs4 import BeautifulSoup
+
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # Fall back to latin-1 (never raises -- every byte value is a
+            # valid latin-1 code point) rather than failing outright on
+            # HTML that declares a different encoding than UTF-8.
+            text = raw.decode("latin-1")
+
+        soup = BeautifulSoup(text, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        return soup.get_text(separator="\n\n", strip=True)
+    except IngestionError:
+        raise
+    except Exception as exc:
+        raise IngestionError(f"Failed to extract text from '{filename}': {exc}") from exc
+
+
+def _default_extract(raw: bytes, content_type: str, filename: str) -> str:
+    """Extracts plain text from the uploaded file's raw bytes, dispatching
+    on `content_type` to the format-specific extractor above.
 
     Raises `IngestionError` on any failure (corrupt file, unsupported
-    content type, pypdf parse error) so the pipeline can record it as the
+    content type, parser error) so the pipeline can record it as the
     document's terminal `failed` status/error rather than letting a raw
     library exception propagate."""
     if content_type in _PLAIN_TEXT_CONTENT_TYPES:
@@ -135,16 +186,13 @@ def _default_extract(raw: bytes, content_type: str, filename: str) -> str:
             raise IngestionError(f"File is not valid UTF-8: {exc}") from exc
 
     if content_type == "application/pdf":
-        try:
-            import io
+        return _extract_pdf(raw, filename)
 
-            from pypdf import PdfReader
+    if content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return _extract_docx(raw, filename)
 
-            reader = PdfReader(io.BytesIO(raw))
-            pages = [page.extract_text() or "" for page in reader.pages]
-            return "\n\n".join(pages)
-        except Exception as exc:
-            raise IngestionError(f"Failed to extract text from '{filename}': {exc}") from exc
+    if content_type == "text/html":
+        return _extract_html(raw, filename)
 
     raise IngestionError(f"Unsupported content type for extraction: {content_type}")
 

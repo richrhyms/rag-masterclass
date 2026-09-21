@@ -95,7 +95,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
           Drag and drop files here, or click to select
         </p>
         <p className="text-xs text-gray-400">
-          .txt, .md, .pdf (max 5MB per file)
+          .txt, .md, .pdf, .docx, .html (max 5MB per file)
         </p>
       </div>
 
@@ -106,7 +106,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
             type="file"
             className="hidden"
             multiple
-            accept=".txt,.md,.pdf"
+            accept=".txt,.md,.pdf,.docx,.html,.htm"
             onChange={handleFileChange}
             disabled={uploading}
           />

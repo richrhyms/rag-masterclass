@@ -111,27 +111,44 @@ def test_upload_pdf_is_accepted_without_eager_utf8_validation(client: TestClient
     assert body["content_type"] == "application/pdf"
 
 
-def test_upload_rejects_docx_and_html(client: TestClient) -> None:
-    # Not supported by the pypdf-based fallback (docling would have covered
-    # these but has no PyTorch wheel for this platform -- see
-    # services/ingestion.py's _default_extract docstring).
+def test_upload_docx_is_accepted_without_eager_utf8_validation(client: TestClient) -> None:
+    # Binary content that is NOT valid UTF-8 -- must not be rejected at
+    # upload time (docx is a binary zip format). Real extraction happens
+    # in the background pipeline (python-docx), covered separately in
+    # test_ingestion_pipeline.py.
     resp = client.post(
         "/api/documents",
         files={
             "file": (
                 "doc.docx",
-                b"fake docx bytes",
+                b"PK\xff\xfe not real docx bytes",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         },
     )
-    assert resp.status_code == 415
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["content_type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
+
+def test_upload_html_is_accepted(client: TestClient) -> None:
     resp = client.post(
         "/api/documents",
-        files={"file": ("page.html", b"<html><body>hi</body></html>", "text/html")},
+        files={"file": ("page.html", b"<html><body><p>hello</p></body></html>", "text/html")},
+    )
+    assert resp.status_code == 202
+    assert resp.json()["content_type"] == "text/html"
+
+
+def test_upload_rejects_unsupported_extension_still_rejects_other_binaries(client: TestClient) -> None:
+    # docx/html acceptance above must not have widened the extension
+    # allowlist beyond what's actually supported.
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("archive.zip", b"PK\x03\x04 fake zip", "application/zip")},
     )
     assert resp.status_code == 415
+    assert resp.json()["detail"]["code"] == "unsupported_file_type"
 
 
 def test_upload_rejects_oversized_file(fake_client: FakeSupabaseClient, monkeypatch) -> None:
