@@ -454,6 +454,15 @@ async def generate_chat_stream(
             model=settings.LLM_MODEL,
             messages=messages,
             stream=True,
+            # An explicit cap was missing entirely here -- harmless with
+            # Gemini (which applies its own sane internal ceiling), but a
+            # real problem on credit-metered providers like OpenRouter:
+            # with no max_tokens, the request implicitly asks for the
+            # model's full max output (e.g. 65536 for gpt-4.1-mini), which
+            # a normal account balance can't afford and fails outright
+            # before generating anything. 2000 is generous for a real
+            # synthesized answer while keeping cost/risk bounded.
+            max_tokens=2000,
         )
         async for event in stream:
             if not event.choices:
