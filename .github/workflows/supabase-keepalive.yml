@@ -24,17 +24,22 @@ jobs:
     steps:
       - name: Ping Supabase REST endpoint
         run: |
-          status=$(curl -s -o /dev/null -w "%{http_code}" \
+          # A real PostgREST query against an actual table -- genuine
+          # Postgres activity, unlike a bare health-check endpoint (which
+          # may not touch the database at all). RLS correctly blocks
+          # unauthenticated reads (owner_all policy, `user_id = auth.uid()`),
+          # so this returns `[]` with 200 rather than any real data --
+          # anon key only, read-only, nothing exposed. (Note: `/rest/v1/`
+          # itself -- no table path -- requires the service_role key and
+          # 401s for anon; a real table query is both the safer and the
+          # more meaningful keep-alive signal.)
+          http_status=$(curl -s -o /dev/null -w "%{http_code}" \
             --max-time 15 \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
             -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
-            "${{ secrets.SUPABASE_URL }}/rest/v1/")
-          echo "Supabase REST endpoint responded with HTTP $status"
-          # PostgREST's root route returns 200 when reachable and
-          # authenticated; anything else means the keep-alive ping itself
-          # failed to reach/wake the project, which should surface as a
-          # failed Actions run rather than a silent no-op.
-          if [ "$status" != "200" ]; then
+            "${{ secrets.SUPABASE_URL }}/rest/v1/thread?select=id&limit=1")
+          echo "Supabase REST endpoint responded with HTTP $http_status"
+          if [ "$http_status" != "200" ]; then
             echo "Unexpected status code -- treating as a failed keep-alive ping."
             exit 1
           fi
