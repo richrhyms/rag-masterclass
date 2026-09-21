@@ -98,7 +98,7 @@ export const IngestionPage: React.FC = () => {
       <div className="space-y-2">
         <h1 className="text-3xl font-bold tracking-tight">Knowledge Ingestion</h1>
         <p className="text-muted-foreground">
-          Upload your documents to ground the assistant in your data. Supported formats: .txt, .md, .pdf
+          Upload your documents to ground the assistant in your data. Supported formats: .txt, .md, .pdf, .docx, .html
         </p>
       </div>
 

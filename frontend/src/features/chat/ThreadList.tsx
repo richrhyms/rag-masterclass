@@ -105,7 +105,7 @@ export function ThreadList({ activeThreadId, onSelectThread }: ThreadListProps) 
       // handler de-dupes by id.
       setThreads((prev) => prev.filter((t) => t.id !== thread.id))
       if (activeThreadId === thread.id) {
-        navigate('/chat')
+        navigate('/')
       }
     } catch (e: any) {
       console.error('Failed to delete thread', e)
