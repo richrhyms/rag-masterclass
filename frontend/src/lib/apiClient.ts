@@ -49,11 +49,19 @@ export async function apiRequest<T>(
   })
 
   if (!response.ok) {
+    // Two error-response shapes exist across the backend: routers using
+    // FastAPI's default HTTPException handling get their `detail={...}`
+    // payload wrapped under a `detail` key ({"detail": {"error","code"}}),
+    // while threads.py's custom JSONResponse-based `_error()` helper
+    // returns the same fields flat ({"error","code"}). Checking `detail`
+    // first (only when it's the expected shape, not a plain string) covers
+    // both without assuming either router's convention.
     const errorData = await response.json().catch(() => ({}))
+    const detail = errorData.detail && typeof errorData.detail === 'object' ? errorData.detail : errorData
     throw {
       status: response.status,
-      error: errorData.error || 'An unexpected error occurred',
-      code: errorData.code || 'unknown_error',
+      error: detail.error || 'An unexpected error occurred',
+      code: detail.code || 'unknown_error',
     }
   }
 

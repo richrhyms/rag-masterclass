@@ -53,6 +53,10 @@ class _FakeTableQuery:
         self._filtered = [row for row in self._filtered if str(row.get(key)) == str(value)]
         return self
 
+    def neq(self, key: str, value: Any) -> "_FakeTableQuery":
+        self._filtered = [row for row in self._filtered if str(row.get(key)) != str(value)]
+        return self
+
     def order(self, key: str, desc: bool = False) -> "_FakeTableQuery":
         self._order_key = key
         self._order_desc = desc

@@ -12,6 +12,7 @@ Client usage per design.md's RLS-boundary section:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
@@ -119,6 +120,56 @@ async def upload_document(
                 detail={"error": f"File is not valid UTF-8: {exc}", "code": "invalid_request"},
             ) from exc
 
+    # Module 3 (Record Manager): content-hash dedup, keyed on the raw
+    # uploaded bytes -- computed before storage/ingestion so an exact
+    # duplicate is rejected without any processing cost (no Storage write,
+    # no extraction, no embedding calls). `failed` documents are excluded
+    # from both checks below so a user can freely retry a filename/content
+    # that previously failed to ingest.
+    content_hash = hashlib.sha256(raw).hexdigest()
+
+    duplicate_resp = (
+        db.table("document")
+        .select("id,filename")
+        .eq("user_id", str(user.id))
+        .eq("content_hash", content_hash)
+        .neq("status", "failed")
+        .execute()
+    )
+    if duplicate_resp.data:
+        existing = duplicate_resp.data[0]
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": f"This file's content is already ingested as '{existing['filename']}'.",
+                "code": "duplicate_content",
+            },
+        )
+
+    # Incremental update: re-uploading the same filename with DIFFERENT
+    # content (a revised report, an updated manual) supersedes the prior
+    # version -- delete the old document (chunks cascade via FK) and its
+    # Storage object, then ingest the new content fresh under a new id,
+    # rather than leaving two versions of "the same document" active in
+    # retrieval simultaneously.
+    #
+    # The stale document(s) are only LOOKED UP here, not deleted yet: the
+    # delete happens at the very end, after the new upload + document row
+    # are fully committed. Deleting first (as an earlier version of this
+    # code did) meant a subsequent Storage/DB failure permanently lost the
+    # old document with nothing to replace it -- unrecoverable data loss.
+    # With the delete last, a failure anywhere in the new-upload path
+    # leaves the old document completely untouched.
+    stale_resp = (
+        db.table("document")
+        .select("id,storage_path")
+        .eq("user_id", str(user.id))
+        .eq("filename", file.filename)
+        .neq("status", "failed")
+        .execute()
+    )
+    stale_documents = stale_resp.data or []
+
     document_id = uuid4()
     byte_size = len(raw)
 
@@ -146,6 +197,7 @@ async def upload_document(
         "content_type": content_type,
         "byte_size": byte_size,
         "status": "queued",
+        "content_hash": content_hash,
     }
     try:
         resp = db.table("document").insert(insert_payload).execute()
@@ -157,6 +209,20 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to create the document record.", "code": "server_error"},
         ) from exc
+
+    # New document is now fully committed -- safe to remove the superseded
+    # version(s). Best-effort: if this fails, the new document still
+    # succeeds and is returned to the caller; a stray old row/Storage
+    # object left behind is a harmless, recoverable inconsistency, unlike
+    # losing the old document before the new one existed.
+    for stale in stale_documents:
+        try:
+            db.table("document").delete().eq("id", stale["id"]).eq("user_id", str(user.id)).execute()
+            storage.delete_document_object(service_client, stale["storage_path"])
+        except Exception:
+            logger.exception(
+                "Failed to remove superseded document %s while uploading %s", stale["id"], document_id
+            )
 
     background_tasks.add_task(
         ingestion.run_ingestion_pipeline,

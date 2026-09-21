@@ -35,6 +35,11 @@ class DocumentOut(BaseModel):
     # supabase/migrations). Defaults true to match the DB column default, so
     # existing rows/fixtures without it deserialize unchanged.
     active: bool = True
+    # Module 4: LLM-extracted values keyed by configured metadata field
+    # name (app/routers/metadata_fields.py), e.g. {"category": "Solar EPC
+    # Contractor"}. Defaults to {} so documents ingested before any field
+    # definitions existed (or fixtures without it) deserialize unchanged.
+    metadata: dict = {}
 
 
 class MessageOut(BaseModel):

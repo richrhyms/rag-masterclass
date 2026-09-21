@@ -1,15 +1,18 @@
 import React, { useEffect, useState } from 'react'
 import { apiRequest } from '@/lib/apiClient'
 import { supabase } from '@/lib/supabaseClient'
-import type { Document } from '@/lib/types'
+import type { Document, MetadataFieldDefinition } from '@/lib/types'
 import { FileUpload } from './FileUpload'
 import { DocumentList } from './DocumentList'
 import { GuardrailToggle } from './GuardrailToggle'
+import { MetadataFieldsSettings } from './MetadataFieldsSettings'
+import { MetadataFilterBar } from './MetadataFilterBar'
 
 export const IngestionPage: React.FC = () => {
   const [documents, setDocuments] = useState<Document[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [fieldDefinitions, setFieldDefinitions] = useState<MetadataFieldDefinition[]>([])
 
   const fetchDocuments = async () => {
     try {
@@ -23,8 +26,19 @@ export const IngestionPage: React.FC = () => {
     }
   }
 
+  const fetchFieldDefinitions = async () => {
+    try {
+      const data = await apiRequest<MetadataFieldDefinition[]>('/metadata-fields')
+      setFieldDefinitions(data)
+    } catch {
+      // Non-critical: the filter bar simply stays hidden if this fails to
+      // load; MetadataFieldsSettings surfaces its own load error already.
+    }
+  }
+
   useEffect(() => {
     fetchDocuments()
+    fetchFieldDefinitions()
 
     const channel = supabase
       .channel('document-changes')
@@ -78,6 +92,30 @@ export const IngestionPage: React.FC = () => {
     }
   }
 
+  const handleApplyMetadataFilter = async (matchingIds: string[], nonMatchingIds: string[]) => {
+    const previous = documents
+    // optimistic update
+    setDocuments((prev) =>
+      prev.map((doc) => ({
+        ...doc,
+        active: matchingIds.includes(doc.id) ? true : nonMatchingIds.includes(doc.id) ? false : doc.active,
+      }))
+    )
+    try {
+      await Promise.all([
+        ...matchingIds.map((id) =>
+          apiRequest<Document>(`/documents/${id}`, { method: 'PATCH', body: JSON.stringify({ active: true }) })
+        ),
+        ...nonMatchingIds.map((id) =>
+          apiRequest<Document>(`/documents/${id}`, { method: 'PATCH', body: JSON.stringify({ active: false }) })
+        ),
+      ])
+    } catch (err: any) {
+      setDocuments(previous)
+      alert(`Failed to apply filter: ${err.error || 'Unknown error'}`)
+    }
+  }
+
   const handleToggleAll = async (active: boolean) => {
     const previous = documents
     setDocuments((prev) => prev.map((doc) => ({ ...doc, active })))
@@ -104,6 +142,8 @@ export const IngestionPage: React.FC = () => {
 
       <GuardrailToggle />
 
+      <MetadataFieldsSettings onFieldsChanged={fetchFieldDefinitions} />
+
       <FileUpload onUploadSuccess={handleUploadSuccess} />
 
       <div className="space-y-4">
@@ -113,12 +153,19 @@ export const IngestionPage: React.FC = () => {
         ) : error ? (
           <div className="text-red-500 py-8 text-center">{error}</div>
         ) : (
-          <DocumentList
-            documents={documents}
-            onDelete={handleDeleteDocument}
-            onToggleActive={handleToggleActive}
-            onToggleAll={handleToggleAll}
-          />
+          <>
+            <MetadataFilterBar
+              documents={documents}
+              fieldDefinitions={fieldDefinitions}
+              onApplyFilter={handleApplyMetadataFilter}
+            />
+            <DocumentList
+              documents={documents}
+              onDelete={handleDeleteDocument}
+              onToggleActive={handleToggleActive}
+              onToggleAll={handleToggleAll}
+            />
+          </>
         )}
       </div>
     </div>

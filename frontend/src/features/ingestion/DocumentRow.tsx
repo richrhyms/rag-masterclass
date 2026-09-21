@@ -46,6 +46,21 @@ export const DocumentRow: React.FC<DocumentRowProps> = ({ doc, onDelete, onToggl
           </span>
         )}
       </td>
+      <td className="px-4 py-3">
+        <div className="flex flex-wrap gap-1 max-w-xs">
+          {Object.entries(doc.metadata || {})
+            .filter(([, value]) => value != null)
+            .map(([key, value]) => (
+              <span
+                key={key}
+                title={key}
+                className="px-2 py-0.5 rounded-full text-xs bg-zinc-100 text-zinc-600"
+              >
+                {value}
+              </span>
+            ))}
+        </div>
+      </td>
       <td className="px-4 py-3">{doc.chunk_count}</td>
       <td className="px-4 py-3 text-gray-500">{formatSize(doc.byte_size)}</td>
       <td className="px-4 py-3 text-right">

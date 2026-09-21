@@ -188,6 +188,192 @@ def test_upload_rejects_non_utf8_content(client: TestClient) -> None:
     assert resp.json()["detail"]["code"] == "invalid_request"
 
 
+# --- Module 3: content-hash dedup + incremental re-ingest ---
+
+
+def test_upload_rejects_exact_duplicate_content(client: TestClient, fake_client: FakeSupabaseClient) -> None:
+    content = b"identical content, uploaded twice"
+    first = client.post("/api/documents", files={"file": ("notes.txt", content, "text/plain")})
+    assert first.status_code == 202
+
+    second = client.post("/api/documents", files={"file": ("different-name.txt", content, "text/plain")})
+
+    assert second.status_code == 409
+    assert second.json()["detail"]["code"] == "duplicate_content"
+    assert "notes.txt" in second.json()["detail"]["error"]
+    # no second document row or pipeline kickoff -- rejected before any processing
+    assert len(fake_client.tables["document"]) == 1
+    assert len(client.pipeline_calls) == 1  # type: ignore[attr-defined]
+
+
+def test_upload_allows_same_content_reuploaded_after_failure(
+    client: TestClient, fake_client: FakeSupabaseClient
+) -> None:
+    content = b"content that previously failed to ingest"
+    first = client.post("/api/documents", files={"file": ("notes.txt", content, "text/plain")})
+    assert first.status_code == 202
+    fake_client.tables["document"][0]["status"] = "failed"
+
+    second = client.post("/api/documents", files={"file": ("notes.txt", content, "text/plain")})
+
+    assert second.status_code == 202
+    assert len(fake_client.tables["document"]) == 2
+
+
+def test_upload_same_filename_different_content_supersedes_old_version(
+    client: TestClient, fake_client: FakeSupabaseClient
+) -> None:
+    old_document_id = uuid.uuid4()
+    old_storage_path = f"documents/{USER_ID}/{old_document_id}/report.txt"
+    fake_client.storage.buckets["documents"] = {f"{USER_ID}/{old_document_id}/report.txt": b"old data"}
+    fake_client.table("document").insert(
+        {
+            "id": str(old_document_id),
+            "user_id": str(USER_ID),
+            "filename": "report.txt",
+            "storage_path": old_storage_path,
+            "content_type": "text/plain",
+            "byte_size": 8,
+            "status": "completed",
+            "content_hash": "old-hash",
+        }
+    ).execute()
+
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("report.txt", b"revised report content", "text/plain")},
+    )
+
+    assert resp.status_code == 202
+    # old version's row and storage object are gone; only the new one remains
+    remaining = fake_client.tables["document"]
+    assert len(remaining) == 1
+    assert remaining[0]["id"] != str(old_document_id)
+    assert remaining[0]["filename"] == "report.txt"
+    assert f"{USER_ID}/{old_document_id}/report.txt" not in fake_client.storage.buckets["documents"]
+
+
+def test_upload_does_not_supersede_a_failed_same_filename_document(
+    client: TestClient, fake_client: FakeSupabaseClient
+) -> None:
+    old_document_id = uuid.uuid4()
+    fake_client.table("document").insert(
+        {
+            "id": str(old_document_id),
+            "user_id": str(USER_ID),
+            "filename": "report.txt",
+            "storage_path": f"documents/{USER_ID}/{old_document_id}/report.txt",
+            "content_type": "text/plain",
+            "byte_size": 8,
+            "status": "failed",
+            "content_hash": "old-hash",
+        }
+    ).execute()
+
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("report.txt", b"fresh attempt at the same filename", "text/plain")},
+    )
+
+    assert resp.status_code == 202
+    # the failed row is left alone (not superseded) -- both rows now exist
+    remaining = fake_client.tables["document"]
+    assert len(remaining) == 2
+    assert any(row["id"] == str(old_document_id) for row in remaining)
+
+
+def test_upload_supersede_leaves_old_document_intact_if_new_upload_fails(
+    client: TestClient, fake_client: FakeSupabaseClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: an earlier version of the supersede logic deleted
+    the old document BEFORE the new upload was confirmed, so a Storage
+    failure right after permanently lost the old document with nothing to
+    replace it. The delete must happen last, only once the new document is
+    fully committed."""
+    old_document_id = uuid.uuid4()
+    old_storage_path = f"documents/{USER_ID}/{old_document_id}/report.txt"
+    fake_client.storage.buckets["documents"] = {f"{USER_ID}/{old_document_id}/report.txt": b"old data"}
+    fake_client.table("document").insert(
+        {
+            "id": str(old_document_id),
+            "user_id": str(USER_ID),
+            "filename": "report.txt",
+            "storage_path": old_storage_path,
+            "content_type": "text/plain",
+            "byte_size": 8,
+            "status": "completed",
+            "content_hash": "old-hash",
+        }
+    ).execute()
+
+    from app.routers import documents as documents_module
+
+    def _boom_upload(*_args, **_kwargs):
+        raise RuntimeError("transient storage failure")
+
+    monkeypatch.setattr(documents_module.storage, "upload_document", _boom_upload)
+
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("report.txt", b"revised report content", "text/plain")},
+    )
+
+    assert resp.status_code == 500
+    # the old document must still be fully intact -- both the row and its
+    # storage object -- since the new upload never succeeded
+    remaining = fake_client.tables["document"]
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == str(old_document_id)
+    assert f"{USER_ID}/{old_document_id}/report.txt" in fake_client.storage.buckets["documents"]
+
+
+def test_upload_supersede_leaves_old_document_intact_if_insert_fails(
+    client: TestClient, fake_client: FakeSupabaseClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_document_id = uuid.uuid4()
+    old_storage_path = f"documents/{USER_ID}/{old_document_id}/report.txt"
+    fake_client.storage.buckets["documents"] = {f"{USER_ID}/{old_document_id}/report.txt": b"old data"}
+    fake_client.table("document").insert(
+        {
+            "id": str(old_document_id),
+            "user_id": str(USER_ID),
+            "filename": "report.txt",
+            "storage_path": old_storage_path,
+            "content_type": "text/plain",
+            "byte_size": 8,
+            "status": "completed",
+            "content_hash": "old-hash",
+        }
+    ).execute()
+
+    # The fixture setup above already completed its own "document" table
+    # insert before the request is made, so the *next* insert on that
+    # table is unambiguously the new document's -- fail exactly that one.
+    original_table = fake_client.table
+
+    def _boom_on_next_document_insert(name, *args, **kwargs):
+        query = original_table(name, *args, **kwargs)
+        if name == "document":
+            def _insert(_payload):
+                raise RuntimeError("transient db failure")
+
+            query.insert = _insert
+        return query
+
+    monkeypatch.setattr(fake_client, "table", _boom_on_next_document_insert)
+
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("report.txt", b"revised report content", "text/plain")},
+    )
+
+    assert resp.status_code == 500
+    remaining = fake_client.tables["document"]
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == str(old_document_id)
+    assert f"{USER_ID}/{old_document_id}/report.txt" in fake_client.storage.buckets["documents"]
+
+
 # --- GET /api/documents ---
 
 
