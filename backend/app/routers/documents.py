@@ -12,6 +12,7 @@ Client usage per design.md's RLS-boundary section:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
@@ -119,6 +120,50 @@ async def upload_document(
                 detail={"error": f"File is not valid UTF-8: {exc}", "code": "invalid_request"},
             ) from exc
 
+    # Module 3 (Record Manager): content-hash dedup, keyed on the raw
+    # uploaded bytes -- computed before storage/ingestion so an exact
+    # duplicate is rejected without any processing cost (no Storage write,
+    # no extraction, no embedding calls). `failed` documents are excluded
+    # from both checks below so a user can freely retry a filename/content
+    # that previously failed to ingest.
+    content_hash = hashlib.sha256(raw).hexdigest()
+
+    duplicate_resp = (
+        db.table("document")
+        .select("id,filename")
+        .eq("user_id", str(user.id))
+        .eq("content_hash", content_hash)
+        .neq("status", "failed")
+        .execute()
+    )
+    if duplicate_resp.data:
+        existing = duplicate_resp.data[0]
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": f"This file's content is already ingested as '{existing['filename']}'.",
+                "code": "duplicate_content",
+            },
+        )
+
+    # Incremental update: re-uploading the same filename with DIFFERENT
+    # content (a revised report, an updated manual) supersedes the prior
+    # version -- delete the old document (chunks cascade via FK) and its
+    # Storage object, then ingest the new content fresh under a new id,
+    # rather than leaving two versions of "the same document" active in
+    # retrieval simultaneously.
+    stale_resp = (
+        db.table("document")
+        .select("id,storage_path")
+        .eq("user_id", str(user.id))
+        .eq("filename", file.filename)
+        .neq("status", "failed")
+        .execute()
+    )
+    for stale in stale_resp.data or []:
+        db.table("document").delete().eq("id", stale["id"]).eq("user_id", str(user.id)).execute()
+        storage.delete_document_object(service_client, stale["storage_path"])
+
     document_id = uuid4()
     byte_size = len(raw)
 
@@ -146,6 +191,7 @@ async def upload_document(
         "content_type": content_type,
         "byte_size": byte_size,
         "status": "queued",
+        "content_hash": content_hash,
     }
     try:
         resp = db.table("document").insert(insert_payload).execute()

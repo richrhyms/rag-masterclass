@@ -188,6 +188,100 @@ def test_upload_rejects_non_utf8_content(client: TestClient) -> None:
     assert resp.json()["detail"]["code"] == "invalid_request"
 
 
+# --- Module 3: content-hash dedup + incremental re-ingest ---
+
+
+def test_upload_rejects_exact_duplicate_content(client: TestClient, fake_client: FakeSupabaseClient) -> None:
+    content = b"identical content, uploaded twice"
+    first = client.post("/api/documents", files={"file": ("notes.txt", content, "text/plain")})
+    assert first.status_code == 202
+
+    second = client.post("/api/documents", files={"file": ("different-name.txt", content, "text/plain")})
+
+    assert second.status_code == 409
+    assert second.json()["detail"]["code"] == "duplicate_content"
+    assert "notes.txt" in second.json()["detail"]["error"]
+    # no second document row or pipeline kickoff -- rejected before any processing
+    assert len(fake_client.tables["document"]) == 1
+    assert len(client.pipeline_calls) == 1  # type: ignore[attr-defined]
+
+
+def test_upload_allows_same_content_reuploaded_after_failure(
+    client: TestClient, fake_client: FakeSupabaseClient
+) -> None:
+    content = b"content that previously failed to ingest"
+    first = client.post("/api/documents", files={"file": ("notes.txt", content, "text/plain")})
+    assert first.status_code == 202
+    fake_client.tables["document"][0]["status"] = "failed"
+
+    second = client.post("/api/documents", files={"file": ("notes.txt", content, "text/plain")})
+
+    assert second.status_code == 202
+    assert len(fake_client.tables["document"]) == 2
+
+
+def test_upload_same_filename_different_content_supersedes_old_version(
+    client: TestClient, fake_client: FakeSupabaseClient
+) -> None:
+    old_document_id = uuid.uuid4()
+    old_storage_path = f"documents/{USER_ID}/{old_document_id}/report.txt"
+    fake_client.storage.buckets["documents"] = {f"{USER_ID}/{old_document_id}/report.txt": b"old data"}
+    fake_client.table("document").insert(
+        {
+            "id": str(old_document_id),
+            "user_id": str(USER_ID),
+            "filename": "report.txt",
+            "storage_path": old_storage_path,
+            "content_type": "text/plain",
+            "byte_size": 8,
+            "status": "completed",
+            "content_hash": "old-hash",
+        }
+    ).execute()
+
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("report.txt", b"revised report content", "text/plain")},
+    )
+
+    assert resp.status_code == 202
+    # old version's row and storage object are gone; only the new one remains
+    remaining = fake_client.tables["document"]
+    assert len(remaining) == 1
+    assert remaining[0]["id"] != str(old_document_id)
+    assert remaining[0]["filename"] == "report.txt"
+    assert f"{USER_ID}/{old_document_id}/report.txt" not in fake_client.storage.buckets["documents"]
+
+
+def test_upload_does_not_supersede_a_failed_same_filename_document(
+    client: TestClient, fake_client: FakeSupabaseClient
+) -> None:
+    old_document_id = uuid.uuid4()
+    fake_client.table("document").insert(
+        {
+            "id": str(old_document_id),
+            "user_id": str(USER_ID),
+            "filename": "report.txt",
+            "storage_path": f"documents/{USER_ID}/{old_document_id}/report.txt",
+            "content_type": "text/plain",
+            "byte_size": 8,
+            "status": "failed",
+            "content_hash": "old-hash",
+        }
+    ).execute()
+
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("report.txt", b"fresh attempt at the same filename", "text/plain")},
+    )
+
+    assert resp.status_code == 202
+    # the failed row is left alone (not superseded) -- both rows now exist
+    remaining = fake_client.tables["document"]
+    assert len(remaining) == 2
+    assert any(row["id"] == str(old_document_id) for row in remaining)
+
+
 # --- GET /api/documents ---
 
 
