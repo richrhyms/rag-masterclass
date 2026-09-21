@@ -15,20 +15,18 @@ G-5a). Implements exactly:
 
 All four require auth (`Authorization: Bearer <token>`). Errors use the
 standard flat envelope `{ "error": string, "code": string }` from design.md's
-API Contracts section -- this router returns that shape directly via
-`JSONResponse` rather than `HTTPException` (whose default FastAPI handler
-wraps `detail` under a `"detail"` key, which would not match the frozen
-envelope for the error paths owned here; see the G-5a gate file for a note on
-this pre-existing behavior on the `get_current_user`/`get_db` 401 path,
-which is out of this router's scope to change).
+API Contracts section -- every router in this app raises `HTTPException(
+detail={"error": ..., "code": ...})`, and a global exception handler
+(`app/main.py`) normalizes that to the flat envelope for every response,
+including the `get_current_user`/`get_db` 401 path.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 from supabase import Client
@@ -49,12 +47,11 @@ class ChatRequest(BaseModel):
     message: str
 
 
-def _error(status_code: int, error: str, code: str) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content={"error": error, "code": code})
-
-
-def _not_found() -> JSONResponse:
-    return _error(404, "Thread not found.", "not_found")
+def _not_found() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"error": "Thread not found.", "code": "not_found"},
+    )
 
 
 def _thread_exists(db: Client, user: CurrentUser, thread_id: UUID) -> bool:
@@ -120,7 +117,7 @@ async def delete_thread(
         .execute()
     )
     if not response.data:
-        return _not_found()
+        raise _not_found()
     return None
 
 
@@ -131,7 +128,7 @@ async def list_messages(
     db: Client = Depends(get_db),
 ):
     if not _thread_exists(db, user, thread_id):
-        return _not_found()
+        raise _not_found()
 
     response = (
         db.table("message")
@@ -153,11 +150,14 @@ async def chat(
     settings: Settings = Depends(get_settings),
 ):
     if not _thread_exists(db, user, thread_id):
-        return _not_found()
+        raise _not_found()
 
     message = body.message.strip()
     if not message:
-        return _error(400, "message must not be empty.", "invalid_request")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "message must not be empty.", "code": "invalid_request"},
+        )
 
     # Persist the user message before streaming begins (design.md API
     # Contracts / SSE contract).

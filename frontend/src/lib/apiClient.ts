@@ -31,6 +31,20 @@ async function getJwt() {
   return session.access_token
 }
 
+// Every error response across the whole backend is normalized by a global
+// FastAPI exception handler (backend/app/main.py) to one flat shape:
+// {"error": string, "code": string} -- no router-specific guessing needed
+// here. Shared by apiRequest below and any raw `fetch` call site (e.g.
+// FileUpload.tsx's multipart upload) that needs the same error handling.
+export async function parseApiError(response: Response): Promise<{ status: number; error: string; code: string }> {
+  const body = await response.json().catch(() => ({}))
+  return {
+    status: response.status,
+    error: body.error || 'An unexpected error occurred',
+    code: body.code || 'unknown_error',
+  }
+}
+
 export async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -49,20 +63,7 @@ export async function apiRequest<T>(
   })
 
   if (!response.ok) {
-    // Two error-response shapes exist across the backend: routers using
-    // FastAPI's default HTTPException handling get their `detail={...}`
-    // payload wrapped under a `detail` key ({"detail": {"error","code"}}),
-    // while threads.py's custom JSONResponse-based `_error()` helper
-    // returns the same fields flat ({"error","code"}). Checking `detail`
-    // first (only when it's the expected shape, not a plain string) covers
-    // both without assuming either router's convention.
-    const errorData = await response.json().catch(() => ({}))
-    const detail = errorData.detail && typeof errorData.detail === 'object' ? errorData.detail : errorData
-    throw {
-      status: response.status,
-      error: detail.error || 'An unexpected error occurred',
-      code: detail.code || 'unknown_error',
-    }
+    throw await parseApiError(response)
   }
 
   if (response.status === 204) return {} as T

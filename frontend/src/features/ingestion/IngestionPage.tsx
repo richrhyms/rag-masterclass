@@ -13,6 +13,16 @@ export const IngestionPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [fieldDefinitions, setFieldDefinitions] = useState<MetadataFieldDefinition[]>([])
+  // Snapshot of each document's `active` value from just before the first
+  // filter application in the current "filter session" -- lets "Clear"
+  // restore exactly that prior state instead of force-activating every
+  // document (which would also wipe out any unrelated manual selections
+  // the user made before ever touching the filter bar). Reset to null
+  // once restored. Known limitation: a manual per-document toggle made
+  // *between* Apply and Clear is not itself preserved -- Clear restores
+  // the snapshot from before the filter session started, not a
+  // continuously-updated one.
+  const [preFilterSnapshot, setPreFilterSnapshot] = useState<Record<string, boolean> | null>(null)
 
   const fetchDocuments = async () => {
     try {
@@ -92,8 +102,25 @@ export const IngestionPage: React.FC = () => {
     }
   }
 
+  // Bulk-sets `active` for a specific set of documents in one request
+  // (PATCH /api/documents with document_ids), instead of one PATCH per
+  // document -- used by both apply and clear below. A no-op for an empty
+  // id list (skips the request entirely).
+  const bulkSetActive = async (documentIds: string[], active: boolean) => {
+    if (documentIds.length === 0) return
+    await apiRequest<{ documents: Document[] }>('/documents', {
+      method: 'PATCH',
+      body: JSON.stringify({ active, document_ids: documentIds }),
+    })
+  }
+
   const handleApplyMetadataFilter = async (matchingIds: string[], nonMatchingIds: string[]) => {
     const previous = documents
+    if (!preFilterSnapshot) {
+      const snapshot: Record<string, boolean> = {}
+      for (const doc of documents) snapshot[doc.id] = doc.active
+      setPreFilterSnapshot(snapshot)
+    }
     // optimistic update
     setDocuments((prev) =>
       prev.map((doc) => ({
@@ -102,17 +129,35 @@ export const IngestionPage: React.FC = () => {
       }))
     )
     try {
-      await Promise.all([
-        ...matchingIds.map((id) =>
-          apiRequest<Document>(`/documents/${id}`, { method: 'PATCH', body: JSON.stringify({ active: true }) })
-        ),
-        ...nonMatchingIds.map((id) =>
-          apiRequest<Document>(`/documents/${id}`, { method: 'PATCH', body: JSON.stringify({ active: false }) })
-        ),
-      ])
+      await Promise.all([bulkSetActive(matchingIds, true), bulkSetActive(nonMatchingIds, false)])
     } catch (err: any) {
       setDocuments(previous)
       alert(`Failed to apply filter: ${err.error || 'Unknown error'}`)
+    }
+  }
+
+  const handleClearMetadataFilter = async () => {
+    // Nothing was ever filtered this session -- clearing must not force
+    // every document active, which would silently wipe out any manual
+    // selections made before the filter bar was ever touched.
+    if (!preFilterSnapshot) return
+
+    const previous = documents
+    const snapshot = preFilterSnapshot
+    const restoreActive = Object.entries(snapshot)
+      .filter(([, active]) => active)
+      .map(([id]) => id)
+    const restoreInactive = Object.entries(snapshot)
+      .filter(([, active]) => !active)
+      .map(([id]) => id)
+
+    setDocuments((prev) => prev.map((doc) => (doc.id in snapshot ? { ...doc, active: snapshot[doc.id] } : doc)))
+    try {
+      await Promise.all([bulkSetActive(restoreActive, true), bulkSetActive(restoreInactive, false)])
+      setPreFilterSnapshot(null)
+    } catch (err: any) {
+      setDocuments(previous)
+      alert(`Failed to clear filter: ${err.error || 'Unknown error'}`)
     }
   }
 
@@ -158,6 +203,7 @@ export const IngestionPage: React.FC = () => {
               documents={documents}
               fieldDefinitions={fieldDefinitions}
               onApplyFilter={handleApplyMetadataFilter}
+              onClear={handleClearMetadataFilter}
             />
             <DocumentList
               documents={documents}

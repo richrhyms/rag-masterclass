@@ -126,22 +126,36 @@ async def upload_document(
     # no extraction, no embedding calls). `failed` documents are excluded
     # from both checks below so a user can freely retry a filename/content
     # that previously failed to ingest.
+    #
+    # Both the duplicate check and the supersede check below only need to
+    # know about this user's OWN non-failed documents, so they're answered
+    # from a single fetch instead of two separate queries -- each was
+    # `.eq("user_id", ...)` scoped identically and only differed in which
+    # column they matched on. Deliberately NOT merged via Postgrest's
+    # `.or_()` (a single query with `content_hash.eq.X,filename.eq.Y`):
+    # that requires hand-building a raw filter string, and `file.filename`
+    # is untrusted user input that can contain the exact characters
+    # (`.`, `,`, parens) that syntax uses as delimiters -- a crafted
+    # filename could inject additional filter clauses and potentially leak
+    # another user's document metadata. `.eq()`/`.neq()` are safely
+    # parameterized by the client library; a raw `.or_()` string is not.
     content_hash = hashlib.sha256(raw).hexdigest()
 
-    duplicate_resp = (
+    existing_docs_resp = (
         db.table("document")
-        .select("id,filename")
+        .select("id,filename,storage_path,content_hash,status")
         .eq("user_id", str(user.id))
-        .eq("content_hash", content_hash)
         .neq("status", "failed")
         .execute()
     )
-    if duplicate_resp.data:
-        existing = duplicate_resp.data[0]
+    existing_docs = existing_docs_resp.data or []
+
+    duplicate = next((doc for doc in existing_docs if doc["content_hash"] == content_hash), None)
+    if duplicate:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
-                "error": f"This file's content is already ingested as '{existing['filename']}'.",
+                "error": f"This file's content is already ingested as '{duplicate['filename']}'.",
                 "code": "duplicate_content",
             },
         )
@@ -153,6 +167,17 @@ async def upload_document(
     # rather than leaving two versions of "the same document" active in
     # retrieval simultaneously.
     #
+    # Only a `completed` document is considered supersedable -- NOT
+    # `queued`/`processing`. Matching on "any non-failed status" (as an
+    # earlier version of this code did) let a concurrent upload of the same
+    # filename delete a document whose background ingestion was still
+    # in-flight: the in-flight task's later chunk inserts would then fail a
+    # foreign-key check against the now-deleted document_id, silently
+    # destroying that upload's content with no visible error. Scoping to
+    # `completed` closes that race -- a same-filename upload arriving while
+    # an earlier one is still processing simply becomes a separate document
+    # instead of touching work that hasn't finished yet.
+    #
     # The stale document(s) are only LOOKED UP here, not deleted yet: the
     # delete happens at the very end, after the new upload + document row
     # are fully committed. Deleting first (as an earlier version of this
@@ -160,15 +185,9 @@ async def upload_document(
     # old document with nothing to replace it -- unrecoverable data loss.
     # With the delete last, a failure anywhere in the new-upload path
     # leaves the old document completely untouched.
-    stale_resp = (
-        db.table("document")
-        .select("id,storage_path")
-        .eq("user_id", str(user.id))
-        .eq("filename", file.filename)
-        .neq("status", "failed")
-        .execute()
-    )
-    stale_documents = stale_resp.data or []
+    stale_documents = [
+        doc for doc in existing_docs if doc["filename"] == file.filename and doc["status"] == "completed"
+    ]
 
     document_id = uuid4()
     byte_size = len(raw)
@@ -268,21 +287,38 @@ class DocumentActiveUpdate(BaseModel):
     active: bool
 
 
+class BulkDocumentActiveUpdate(BaseModel):
+    active: bool
+    # When omitted, applies to every document owned by the caller (the
+    # original "select all" / "deselect all" behavior). When provided,
+    # scopes the update to exactly those documents -- e.g. the Ingestion
+    # UI's metadata filter ("set these matching documents active, these
+    # non-matching ones inactive") in two bulk calls instead of one PATCH
+    # per document.
+    document_ids: list[UUID] | None = None
+
+
 @router.patch("", response_model=DocumentsListResponse)
 async def update_all_documents_active(
-    body: DocumentActiveUpdate,
+    body: BulkDocumentActiveUpdate,
     user: CurrentUser = Depends(get_current_user),
     db: Client = Depends(get_db),
 ) -> DocumentsListResponse:
-    """Bulk document selection ("select all" / "deselect all" in the
-    Ingestion UI): sets `active` on every document owned by the caller in
-    one request rather than one PATCH per row. Path is `/api/documents`
-    (no id), distinct from the per-document `/api/documents/{document_id}`
-    route below -- no route-matching ambiguity between the two."""
+    """Bulk document selection ("select all" / "deselect all", and the
+    metadata filter bar's "apply"/"clear"/restore-snapshot actions in the
+    Ingestion UI): sets `active` on some or all documents owned by the
+    caller in one request rather than one PATCH per row. Path is
+    `/api/documents` (no id), distinct from the per-document
+    `/api/documents/{document_id}` route below -- no route-matching
+    ambiguity between the two."""
     now = datetime.now(timezone.utc).isoformat()
-    db.table("document").update({"active": body.active, "updated_at": now}).eq(
+    update_query = db.table("document").update({"active": body.active, "updated_at": now}).eq(
         "user_id", str(user.id)
-    ).execute()
+    )
+    if body.document_ids is not None:
+        update_query = update_query.in_("id", [str(doc_id) for doc_id in body.document_ids])
+    update_query.execute()
+
     resp = (
         db.table("document")
         .select("*")

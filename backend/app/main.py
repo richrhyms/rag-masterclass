@@ -21,7 +21,8 @@ at the deploy gate" and docs/INTEGRATION.md.
 """
 import logging
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -88,6 +89,46 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": str(exc), "code": "server_misconfigured"},
+        )
+
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+        """Normalizes every `HTTPException` raised anywhere in the app to
+        one flat `{"error": str, "code": str}` response body -- the single
+        error-response convention for this entire API.
+
+        Before this handler existed, FastAPI's own default behavior wrapped
+        whatever `detail` a route passed under a `"detail"` key
+        (`{"detail": {"error": ..., "code": ...}}`), a different shape than
+        threads.py's custom JSONResponse-based error helpers already
+        returned flat. Every frontend caller had to guess which shape a
+        given error response would use. This handler removes the need for
+        that guess: `detail={"error": ..., "code": ...}` (the convention
+        used throughout documents.py/metadata_fields.py/deps.py) is
+        unwrapped to the flat shape directly; a plain string `detail`
+        (FastAPI's own default for framework-level errors) becomes
+        `{"error": <that string>, "code": "error"}`."""
+        if isinstance(exc.detail, dict):
+            content = {
+                "error": exc.detail.get("error", "An error occurred"),
+                "code": exc.detail.get("code", "error"),
+            }
+        else:
+            content = {"error": str(exc.detail), "code": "error"}
+        return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+        """Reshapes FastAPI's default 422 response (`detail` as a list of
+        `{loc, msg, type}` objects -- a third, structurally different shape)
+        into the same flat `{"error", "code"}` convention as every other
+        error response in this app."""
+        message = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}" for err in exc.errors()
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"error": message or "Invalid request.", "code": "invalid_request"},
         )
 
     app.include_router(health.router)

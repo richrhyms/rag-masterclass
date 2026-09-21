@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
-import { apiUrl } from '@/lib/apiClient'
+import { apiUrl, parseApiError } from '@/lib/apiClient'
 
 interface FileUploadProps {
   onUploadSuccess: () => void
@@ -29,17 +29,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
       })
 
       if (!response.ok) {
-        // FastAPI's default HTTPException handler wraps the raised `detail`
-        // payload under a `detail` key -- documents.py raises
-        // HTTPException(detail={"error": ..., "code": ...}) throughout, so
-        // the actual response body is {"detail": {"error", "code"}}, not a
-        // flat {"error", "code"}. Reading `errorData.error` directly (as
-        // this used to) always missed, silently falling back to the
-        // generic message for every upload error (unsupported type,
-        // oversized file, invalid UTF-8, duplicate content, etc.).
-        const errorData = await response.json().catch(() => ({}))
-        const detail = errorData.detail && typeof errorData.detail === 'object' ? errorData.detail : errorData
-        throw { error: detail.error || 'Upload failed', code: detail.code }
+        throw await parseApiError(response)
       }
 
       return true
