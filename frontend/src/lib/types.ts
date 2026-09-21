@@ -10,6 +10,13 @@ export interface Document {
   created_at: string
   updated_at: string
   active: boolean
+  metadata: Record<string, string | null>
+}
+
+export interface MetadataFieldDefinition {
+  id: string
+  name: string
+  description: string
 }
 
 export interface Thread {

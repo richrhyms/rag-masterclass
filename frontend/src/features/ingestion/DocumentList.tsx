@@ -61,6 +61,7 @@ export const DocumentList: React.FC<DocumentListProps> = ({
             </th>
             <th className="px-4 py-3 font-medium text-gray-500">Filename</th>
             <th className="px-4 py-3 font-medium text-gray-500">Status</th>
+            <th className="px-4 py-3 font-medium text-gray-500">Metadata</th>
             <th className="px-4 py-3 font-medium text-gray-500">Chunks</th>
             <th className="px-4 py-3 font-medium text-gray-500">Size</th>
             <th className="px-4 py-3 font-medium text-gray-500 text-right">Actions</th>
