@@ -31,7 +31,7 @@ from openai import AsyncOpenAI
 
 from app.config import Settings
 
-logger = logging.getLogger("rag_masterclass.llm")
+logger = logging.getLogger("knsense.llm")
 
 
 class LLMConfigError(RuntimeError):

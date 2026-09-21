@@ -42,7 +42,7 @@ from supabase import Client
 from app.config import Settings
 from app.models import DocumentOut
 
-logger = logging.getLogger("rag_masterclass.ingestion")
+logger = logging.getLogger("knsense.ingestion")
 
 
 # --- Ingestion-specific Pydantic models (additive; NOT in app/models.py) ---

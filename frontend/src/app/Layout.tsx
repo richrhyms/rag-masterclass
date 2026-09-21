@@ -23,7 +23,7 @@ export function Layout() {
       )}>
         <div className="p-4 font-bold text-xl flex items-center gap-2 border-b border-zinc-800">
           <Database className="w-6 h-6 text-indigo-400" />
-          <span>RAG Masterclass</span>
+          <span>KnSense</span>
         </div>
 
         <nav className="flex-1 p-4 space-y-2">

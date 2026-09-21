@@ -1,19 +1,24 @@
-# rag-masterclass
+# KnSense
 
-A locally-runnable Retrieval-Augmented Generation (RAG) web app: a **Chat**
-surface (threaded, streaming, retrieval-augmented conversations) and an
-**Ingestion** surface (manual upload, live processing status, document
-management), covering PRD Modules 1 + 2. Stack: React + TypeScript + Vite +
-Tailwind + shadcn/ui (frontend), FastAPI in a Python venv (backend), Supabase
-(Postgres + pgvector + Auth + Storage + Realtime). LLM calls use the raw
-OpenAI-compatible SDK only -- no LangChain/LangGraph or other orchestration
-framework.
+A customizable, per-client-deployable Retrieval-Augmented Generation (RAG)
+knowledge assistant: a **Chat** surface (threaded, streaming,
+retrieval-augmented conversations with a configurable guardrail restricting
+answers to ingested content) and an **Ingestion** surface (multi-format
+upload -- .txt/.md/.pdf/.docx/.html --, content-hash dedup, live processing
+status, configurable metadata extraction and filtering, document
+management). Stack: React + TypeScript + Vite + Tailwind (frontend), FastAPI
+in a Python venv (backend), Supabase (Postgres + pgvector + Auth + Storage +
+Realtime). LLM calls use the raw OpenAI-compatible SDK only -- no
+LangChain/LangGraph or other orchestration framework -- so the chat and
+embeddings providers are independently swappable via env vars (currently
+OpenRouter for chat, Gemini for embeddings).
 
-> **Status:** this README describes the G-4 foundation slice -- repo scaffold,
-> FastAPI skeleton, Supabase schema/migrations, and env config. The only live
-> endpoint right now is `GET /api/health`; the frontend is a bare boot
-> placeholder. Chat, ingestion, and the real app shell land at later gates
-> (G-5a/G-5b/G-6/G-7).
+> **Status:** the core chat + ingestion experience, hybrid search +
+> reranking, content-hash dedup/incremental re-ingest, and configurable
+> metadata extraction/filtering are all implemented and passing end-to-end
+> testing. Deferred until there's a committed client deployment: additional
+> tool integrations, sub-agent delegation, and production-grade multi-tenant
+> hardening (this app currently assumes one dedicated instance per client).
 
 ## Architecture note: hosted Supabase, no Docker
 
@@ -128,33 +133,47 @@ pytest
 ```
 backend/
   app/
-    main.py        # FastAPI app, CORS, startup config validation, router seam
-    config.py       # Pydantic BaseSettings -- the full env-var contract
-    deps.py          # JWT verification, get_current_user, request-scoped Supabase client
-    models.py        # Shared Pydantic models (frozen after G-4)
+    main.py              # FastAPI app, CORS, global error-response normalization, router registration
+    config.py            # Pydantic BaseSettings -- the full env-var contract
+    deps.py              # JWT verification, get_current_user, request-scoped Supabase client
+    models.py            # Shared Pydantic models
     routers/
-      health.py      # GET /api/health (the only endpoint owned by this gate)
+      health.py          # GET /api/health
+      threads.py         # Thread/message CRUD + POST /chat (SSE streaming)
+      documents.py        # Document upload/list/delete, dedup, bulk active-state selection
+      settings.py         # Chat guardrail settings (restrict-to-documents toggle + threshold)
+      metadata_fields.py  # Configurable metadata field definitions (Module 4)
+    services/
+      chat.py            # Chat guardrail, scope classifier, thread auto-titling
+      retrieval.py        # Hybrid (vector + keyword) search, RRF fusion, LLM reranking
+      ingestion.py         # Multi-format extraction, chunking, embedding, metadata extraction
+      llm.py               # OpenAI-compatible client wiring (chat + embeddings, independently configurable)
+      storage.py           # Supabase Storage upload/delete
   supabase/
-    migrations/       # Tables, indexes, RLS, match_chunks RPC, Realtime publication
+    migrations/           # Tables, indexes, RLS, match_chunks(_hybrid) RPCs, Realtime publications
   tests/
   requirements.txt
   requirements-dev.txt
 frontend/
   src/
-    main.tsx, App.tsx # bare boot placeholder -- real shell lands at G-6/G-7
+    features/chat/         # Threaded chat UI, Markdown rendering, Realtime thread list
+    features/ingestion/     # Upload, document list/filtering, metadata field settings
   .env.example
-.env.example            # backend env template
+.env.example                # backend env template
 ```
 
-## Notes / known limitations of this gate
+## Known limitations
 
-- Chat, ingestion, and the real frontend app shell are intentionally not
-  implemented here -- see `design.md` / `plan.md` in the orchestration task
-  for the gate sequence.
+- This app assumes one dedicated instance per client (its own Supabase
+  project, its own env config) rather than a shared multi-tenant platform --
+  the current single-user-per-instance auth model is a deliberate fit for
+  that deployment shape, not a gap to fix before onboarding another client.
+- Ingestion is manual file upload only -- no connectors or automated
+  pipelines.
+- No text-to-SQL, web-search fallback, or sub-agent delegation (PRD Modules
+  7/8) -- deferred until a real client need justifies the added complexity.
 - This project previously ran a self-hosted Supabase stack (Postgres, Auth,
-  PostgREST, Realtime, Storage, Kong) via `docker-compose.yml`, per
-  `design.md`'s original assumption. It has since been switched to a hosted
-  Supabase project with bare local processes -- Docker artifacts
-  (`docker-compose.yml`, both `Dockerfile`s, `kong.yml`) have been removed.
-  `design.md` itself has not been retroactively edited; this README and
-  `gate-4.md` are the record of the change.
+  PostgREST, Realtime, Storage, Kong) via `docker-compose.yml`. It has since
+  been switched to a hosted Supabase project with bare local processes --
+  Docker artifacts (`docker-compose.yml`, both `Dockerfile`s, `kong.yml`)
+  have been removed.

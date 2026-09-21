@@ -63,7 +63,7 @@ from app.models import RetrievedChunk
 from app.services.llm import LLMConfigError, get_chat_client
 from app.services.retrieval import retrieve_chunks
 
-logger = logging.getLogger("rag_masterclass.chat")
+logger = logging.getLogger("knsense.chat")
 
 _SYSTEM_PROMPT_GROUNDED = (
     "You are a knowledgeable assistant answering questions using the "
