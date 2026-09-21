@@ -30,7 +30,7 @@ from pydantic import ValidationError
 from app.config import get_settings
 from app.routers import documents, health, metadata_fields, settings, threads
 
-logger = logging.getLogger("rag_masterclass")
+logger = logging.getLogger("knsense")
 
 # Local-dev CORS origins for the frontend dev server / docker-compose frontend
 # container. Not part of the env-var configuration contract (design.md scopes
@@ -70,7 +70,7 @@ def _validate_config_or_raise() -> None:
 def create_app() -> FastAPI:
     _validate_config_or_raise()
 
-    app = FastAPI(title="RAG Masterclass API", version="0.1.0")
+    app = FastAPI(title="KnSense API", version="0.1.0")
 
     app.add_middleware(
         CORSMiddleware,

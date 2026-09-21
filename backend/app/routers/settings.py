@@ -25,7 +25,7 @@ from supabase import Client
 
 from app.deps import CurrentUser, get_current_user, get_db, get_service_client
 
-logger = logging.getLogger("rag_masterclass.settings")
+logger = logging.getLogger("knsense.settings")
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 

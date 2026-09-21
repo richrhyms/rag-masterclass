@@ -27,7 +27,7 @@ from app.models import DocumentOut
 from app.services import ingestion, storage
 from app.services.ingestion import DocumentUploadOut, DocumentsListResponse
 
-logger = logging.getLogger("rag_masterclass.documents")
+logger = logging.getLogger("knsense.documents")
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 

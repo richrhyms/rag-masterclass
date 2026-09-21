@@ -44,7 +44,7 @@ from app.config import Settings, get_settings
 from app.models import RetrievedChunk
 from app.services.llm import embed_text, get_chat_client
 
-logger = logging.getLogger("rag_masterclass.retrieval")
+logger = logging.getLogger("knsense.retrieval")
 
 # How much wider than `top_k` the fused candidate pool is before reranking
 # narrows it back down. Wide enough that RRF's rank-based fusion has a

@@ -41,7 +41,7 @@ export function LoginPage() {
       <div className="w-full max-w-md bg-white rounded-xl shadow-lg p-8">
         <div className="text-center mb-8">
           <h2 className="text-3xl font-bold text-zinc-900">Welcome Back</h2>
-          <p className="text-zinc-500 mt-2">Sign in to access your RAG app</p>
+          <p className="text-zinc-500 mt-2">Sign in to access KnSense</p>
         </div>
 
         {error && (

@@ -35,7 +35,7 @@ from uuid import UUID
 
 from supabase import Client
 
-logger = logging.getLogger("rag_masterclass.storage")
+logger = logging.getLogger("knsense.storage")
 
 BUCKET_NAME = "documents"
 
