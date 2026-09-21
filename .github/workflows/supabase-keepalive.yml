@@ -1,0 +1,45 @@
+name: Supabase keep-alive ping
+
+# Free-tier Supabase projects auto-pause after a period of inactivity
+# (observed around 7 days), which was flagged as a real reliability risk
+# for a live client demo -- a client trying the app after it's sat idle
+# would hit a paused/slow database at exactly the worst moment. This is
+# the free workaround: a lightweight authenticated REST request on a
+# schedule well inside that pause window, cheap enough that it doesn't
+# need its own paid keep-alive service.
+#
+# Requires two repo secrets (set once via `gh secret set`, not committed
+# here): SUPABASE_URL and SUPABASE_ANON_KEY.
+
+on:
+  schedule:
+    # Every 3 days at 06:00 UTC -- comfortably inside the ~7-day pause
+    # window with margin for a missed/delayed run.
+    - cron: "0 6 */3 * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase REST endpoint
+        run: |
+          # A real PostgREST query against an actual table -- genuine
+          # Postgres activity, unlike a bare health-check endpoint (which
+          # may not touch the database at all). RLS correctly blocks
+          # unauthenticated reads (owner_all policy, `user_id = auth.uid()`),
+          # so this returns `[]` with 200 rather than any real data --
+          # anon key only, read-only, nothing exposed. (Note: `/rest/v1/`
+          # itself -- no table path -- requires the service_role key and
+          # 401s for anon; a real table query is both the safer and the
+          # more meaningful keep-alive signal.)
+          http_status=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 15 \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/thread?select=id&limit=1")
+          echo "Supabase REST endpoint responded with HTTP $http_status"
+          if [ "$http_status" != "200" ]; then
+            echo "Unexpected status code -- treating as a failed keep-alive ping."
+            exit 1
+          fi
